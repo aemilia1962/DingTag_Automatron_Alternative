@@ -2,6 +2,7 @@ import glob
 import os
 import threading
 import time
+from pathlib import Path
 
 from aibot_dingver import AITranscriberApp
 
@@ -18,14 +19,61 @@ class AutomatronBridgeApp(AITranscriberApp):
         self._bridge_running = True
         self._bridge_lock = threading.Lock()
         self._bridge_seen = set()
-        self._downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        self._downloads_dir = self._resolve_downloads_dir()
         self._trigger_patterns = [
             "dingtalk_format_trigger*.txt",
             "dingtalk_bridge_trigger*.txt",
         ]
 
         threading.Thread(target=self._bridge_trigger_watcher, daemon=True).start()
-        print("[🔌] Automatron Bridge พร้อมรับ trigger จาก Extension แล้ว")
+        print(f"[🔌] Automatron Bridge พร้อมรับ trigger จาก Extension แล้ว (Downloads: {self._downloads_dir})")
+
+    def _resolve_downloads_dir(self) -> str:
+        """
+        Resolve a stable Downloads directory across Windows setups.
+        Users may redirect Downloads to OneDrive or enable 'Ask where to save' in browser,
+        so we also allow overriding via env var / config.json.
+        """
+        # 1) Explicit override
+        env_override = os.environ.get("DINGTAG_DOWNLOADS_DIR") or os.environ.get("DINGTALK_DOWNLOADS_DIR")
+        if env_override and os.path.isdir(env_override):
+            return env_override
+
+        # 2) config.json override (optional)
+        try:
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+            if os.path.exists(config_path):
+                import json
+
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f) or {}
+                cfg_dir = cfg.get("downloads_dir") or cfg.get("bridge_downloads_dir")
+                if isinstance(cfg_dir, str) and cfg_dir.strip() and os.path.isdir(cfg_dir.strip()):
+                    return cfg_dir.strip()
+        except Exception:
+            pass
+
+        # 3) Common Windows paths + fallback to ~/Downloads
+        candidates: list[str] = []
+
+        try:
+            candidates.append(str(Path.home() / "Downloads"))
+        except Exception:
+            pass
+
+        userprofile = os.environ.get("USERPROFILE")
+        if userprofile:
+            candidates.append(os.path.join(userprofile, "Downloads"))
+
+        onedrive = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or os.environ.get("OneDriveCommercial")
+        if onedrive:
+            candidates.append(os.path.join(onedrive, "Downloads"))
+
+        for p in candidates:
+            if p and os.path.isdir(p):
+                return p
+
+        return os.path.join(os.path.expanduser("~"), "Downloads")
 
     def _collect_trigger_files(self):
         paths = []

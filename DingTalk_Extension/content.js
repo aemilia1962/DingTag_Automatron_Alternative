@@ -3,8 +3,9 @@ console.log("🚀 DingTalk Auto-Pilot V17 (Automatron) Loaded!");
 let isAutoPilotOn = false;
 let isProcessing = false;
 let readDelay = 1500; 
-let moveDelay = 1000; 
+let moveDelay = 8000; 
 let activeTimeouts = []; 
+let lastNoTargetLogAt = 0;
 
 function clearAllTasks() {
     activeTimeouts.forEach(t => clearTimeout(t));
@@ -71,6 +72,15 @@ toggleBtn.style.border = 'none'; toggleBtn.style.borderRadius = '6px';
 toggleBtn.style.cursor = 'pointer'; title.style.marginBottom = '15px';
 panel.appendChild(toggleBtn);
 
+const statusLabel = document.createElement('div');
+statusLabel.style.fontSize = '12px';
+statusLabel.style.marginTop = '10px';
+statusLabel.style.padding = '8px';
+statusLabel.style.borderRadius = '8px';
+statusLabel.style.backgroundColor = '#343a40';
+statusLabel.innerText = 'สถานะ: OFF';
+panel.appendChild(statusLabel);
+
 const readLabel = document.createElement('div'); readLabel.style.fontSize = '12px'; readLabel.style.marginTop = '15px'; panel.appendChild(readLabel);
 const readSlider = document.createElement('input'); readSlider.type = 'range'; readSlider.min = '500'; readSlider.max = '5000'; readSlider.step = '100'; readSlider.value = readDelay; readSlider.style.width = '100%'; panel.appendChild(readSlider);
 const moveLabel = document.createElement('div'); moveLabel.style.fontSize = '12px'; moveLabel.style.marginTop = '10px'; panel.appendChild(moveLabel);
@@ -83,10 +93,22 @@ function updateLabels() {
 }
 updateLabels();
 
+function setStatus(text) {
+    statusLabel.innerText = `สถานะ: ${text}`;
+}
+
 toggleBtn.addEventListener('click', () => {
     isAutoPilotOn = !isAutoPilotOn;
-    if (isAutoPilotOn) { toggleBtn.innerText = 'ON - ระบบกำลังทำงาน'; toggleBtn.style.backgroundColor = '#198754'; } 
-    else { toggleBtn.innerText = 'OFF - คลิกเพื่อเปิด'; toggleBtn.style.backgroundColor = '#dc3545'; clearAllTasks(); }
+    if (isAutoPilotOn) {
+        toggleBtn.innerText = 'ON - ระบบกำลังทำงาน';
+        toggleBtn.style.backgroundColor = '#198754';
+        setStatus('กำลังค้นหา target...');
+    } else {
+        toggleBtn.innerText = 'OFF - คลิกเพื่อเปิด';
+        toggleBtn.style.backgroundColor = '#dc3545';
+        clearAllTasks();
+        setStatus('OFF');
+    }
 });
 readSlider.addEventListener('input', (e) => { readDelay = parseInt(e.target.value); updateLabels(); });
 moveSlider.addEventListener('input', (e) => { moveDelay = parseInt(e.target.value); updateLabels(); });
@@ -119,22 +141,45 @@ const delay = (ms) => new Promise(resolve => {
     activeTimeouts.push(t);
 });
 
+async function waitForSelector(selector, { timeoutMs = 8000, intervalMs = 200 } = {}) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        if (!isAutoPilotOn) return null;
+        const el = document.querySelector(selector);
+        if (el) return el;
+        await delay(intervalMs);
+    }
+    return null;
+}
+
 setInterval(() => {
     if (!isAutoPilotOn || isProcessing) return;
 
     try {
-        let targetEm = null;
-        const emTags = document.querySelectorAll('em');
-        for (let em of emTags) {
-            const container = em.closest('.lsf-annotation-items__result-item');
-            if (container && container.textContent.includes('Classification:')) {
-                const text = em.textContent.trim().toLowerCase();
-                if (text === 'invalid' || text === 'valid') { targetEm = em; break; }
+        // รองรับ Element 2 แบบ:
+        // - เก่า: ... <div class="lsf-annotation-items__result-value"><em ...>Valid</em></div>
+        // - ใหม่: ... <div class="lsf-annotation-items__result-value">Valid</div>
+        let targetEl = null;
+        const items = document.querySelectorAll('.lsf-annotation-items__result-item');
+        for (let item of items) {
+            const label = item.querySelector('.lsf-annotation-items__result-label');
+            if (!label) continue;
+            if (!label.textContent || !label.textContent.includes('Classification')) continue;
+
+            const valueEl = item.querySelector('.lsf-annotation-items__result-value');
+            if (!valueEl) continue;
+
+            const valueText = valueEl.textContent ? valueEl.textContent.trim().toLowerCase() : '';
+            if (valueText === 'valid' || valueText === 'invalid') {
+                // คลิกที่ value element เป็นหลัก (แม่นยำสุดทั้ง 2 แบบ)
+                targetEl = valueEl.querySelector('em') || valueEl;
+                break;
             }
         }
 
-        if (targetEm) {
+        if (targetEl) {
             isProcessing = true;
+            setStatus('พบ target แล้ว กำลังทำงาน...');
             
             (async () => {
                 try {
@@ -143,14 +188,15 @@ setInterval(() => {
                     if (!isAutoPilotOn) return;
                     
                     // --- สเต็ป 1: กด Classification ---
-                    targetEm.click(); 
+                    targetEl.click(); 
                     console.log(`🖱️ 1. กด Classification เรียบร้อย!`);
 
                     // --- สเต็ป 2: โฟกัสกล่อง และลบ Spaces ---
                     await delay(1000); 
                     if (!isAutoPilotOn) return;
-                    
-                    let ta = document.querySelector('textarea[name="Annotation Result"]');
+
+                    // รอ Text Area โผล่มา (กันกรณี UI โหลดช้า/DOM เปลี่ยน)
+                    let ta = await waitForSelector('textarea[name="Annotation Result"]', { timeoutMs: 8000, intervalMs: 250 });
                     if (ta) {
                         ta.focus();
                         console.log(`📝 2. โฟกัสกล่องแล้ว กำลังหาปุ่ม Delete Spaces...`);
@@ -166,6 +212,7 @@ setInterval(() => {
 
                         // --- สเต็ป 3: เรียก Python Bridge (หลัง Delete Spaces) ---
                         console.log(`📡 3. ส่งสัญญาณให้ Python ทำ "ดูดเสียงและวางข้อความ"...`);
+                        setStatus('ส่ง trigger ให้ Python...');
                         const beforeValue = ta.value;
                         const triggerName = `dingtalk_bridge_trigger_${Date.now()}.txt`;
                         const l = document.createElement('a');
@@ -175,12 +222,14 @@ setInterval(() => {
 
                         // รอ Python วางข้อความ (สูงสุด 10 วินาที)
                         console.log(`⏳ รอ Python ประมวลผล... (Max 10s)`);
+                        setStatus('รอ Python ประมวลผล...');
                         let aiDone = false;
                         for(let i=0; i<20; i++) { // 20 รอบ * 500ms = 10 วิ
                             if (!isAutoPilotOn) return;
                             if (ta.value.trim() && ta.value !== beforeValue) {
                                 aiDone = true;
                                 console.log(`✨ Python วางข้อความเสร็จแล้ว!`);
+                                setStatus('Python วางข้อความเสร็จแล้ว');
                                 break;
                             }
                             await delay(500);
@@ -188,9 +237,13 @@ setInterval(() => {
                         
                         if (!aiDone) {
                             console.log("⚠️ Python ตอบสนองช้าเกินไป! ฝืนเดินหน้าต่อ...");
+                            setStatus('Python ไม่ตอบสนอง/ช้าเกินไป');
                         }
                     } else {
                         console.log("⚠️ ไม่พบ Text Area...");
+                        setStatus('ไม่พบ Text Area');
+                        // สำคัญ: ถ้าไม่มี Text Area ให้ยกเลิกรอบนี้ ไม่ไปกด Accept มั่ว
+                        return;
                     }
 
                     // รอเลื่อนเมาส์
@@ -203,6 +256,8 @@ setInterval(() => {
                         console.log(`✅ 4. กดปุ่มยืนยันงาน (Accept/Fix) สำเร็จ!`);
                     } else {
                         console.log(`❌ 4. หาปุ่ม Accept ไม่เจอครับ`);
+                        setStatus('หาปุ่ม Accept ไม่เจอ');
+                        return;
                     }
 
                     // --- สเต็ป 5: รอเช็ค Quality Check Failed ---
@@ -216,13 +271,22 @@ setInterval(() => {
 
                 } catch (e) {
                     console.error("Sequence Error:", e);
+                    setStatus('เกิด error (ดู Console)');
                 } finally {
                     await delay(1500);
                     isProcessing = false;
                     activeTimeouts = [];
                     console.log("🔄 จบวงจร เตรียมรับงานต่อไป...");
+                    if (isAutoPilotOn) setStatus('กำลังค้นหา target...');
                 }
             })();
+        } else {
+            const now = Date.now();
+            if (now - lastNoTargetLogAt > 5000) {
+                lastNoTargetLogAt = now;
+                console.log("⏳ ON อยู่ แต่ยังไม่เจอ target (Classification: valid/invalid) — ตรวจหน้าเว็บ/DOM/สิทธิ์ Extension");
+                setStatus('ยังไม่เจอ target (รอ Classification...)');
+            }
         }
     } catch (e) { isProcessing = false; }
 }, 1000);
