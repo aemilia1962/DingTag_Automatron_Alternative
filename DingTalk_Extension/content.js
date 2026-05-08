@@ -1,4 +1,4 @@
-console.log("🚀 DingTalk Auto-Pilot V16 (Aggressive Clicker + Timeout Fix) Loaded!");
+console.log("🚀 DingTalk Auto-Pilot V17 (Automatron) Loaded!");
 
 let isAutoPilotOn = false;
 let isProcessing = false;
@@ -14,6 +14,42 @@ function clearAllTasks() {
 }
 
 // ----------------------------------------------------
+// ระบบดูดเสียง (Alt + S) - ใช้ร่วมกับ aibot_automatron.py
+// ----------------------------------------------------
+async function downloadAudio() {
+    const mediaEl = document.querySelector('audio, video');
+    if (!mediaEl || !mediaEl.src) {
+        console.log("⚠️ ไม่เจอ audio/video element สำหรับดูดเสียง");
+        return false;
+    }
+
+    try {
+        const response = await fetch(mediaEl.src);
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'dingtalk_temp.wav';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+        console.log("🎵 ดูดเสียงสำเร็จ: dingtalk_temp.wav");
+        return true;
+    } catch (e) {
+        console.error("❌ downloadAudio error:", e);
+        return false;
+    }
+}
+
+window.addEventListener('keydown', (e) => {
+    if (e.altKey && e.code === 'KeyS') {
+        e.preventDefault();
+        downloadAudio();
+    }
+});
+
+// ----------------------------------------------------
 // แผงควบคุม UI
 // ----------------------------------------------------
 const panel = document.createElement('div');
@@ -23,7 +59,7 @@ panel.style.color = 'white'; panel.style.borderRadius = '12px'; panel.style.widt
 panel.style.fontFamily = 'Arial, sans-serif';
 
 const title = document.createElement('div');
-title.innerText = '🤖 DingTalk V16 (Aggressive)';
+title.innerText = '🤖 DingTalk V17 (Automatron)';
 title.style.textAlign = 'center'; title.style.marginBottom = '15px'; title.style.fontWeight = 'bold';
 panel.appendChild(title);
 
@@ -128,22 +164,24 @@ setInterval(() => {
                             console.log(`⚠️ ไม่พบปุ่ม Delete Spaces...`);
                         }
 
-                        // --- สเต็ป 3: เรียก Python ---
-                        console.log(`📡 3. ส่งสัญญาณเรียก Python...`);
+                        // --- สเต็ป 3: เรียก Python Bridge (หลัง Delete Spaces) ---
+                        console.log(`📡 3. ส่งสัญญาณให้ Python ทำ "ดูดเสียงและวางข้อความ"...`);
+                        const beforeValue = ta.value;
+                        const triggerName = `dingtalk_bridge_trigger_${Date.now()}.txt`;
                         const l = document.createElement('a');
-                        l.href = 'data:text/plain;charset=utf-8,trigger';
-                        l.download = 'dingtalk_format_trigger.txt';
+                        l.href = 'data:text/plain;charset=utf-8,mode=dingtalk_voice_after_delete_spaces';
+                        l.download = triggerName;
                         document.body.appendChild(l); l.click(); document.body.removeChild(l);
 
-                        // รอ Python วางข้อความ (สูงสุดแค่ 10 วินาที พอ!)
+                        // รอ Python วางข้อความ (สูงสุด 10 วินาที)
                         console.log(`⏳ รอ Python ประมวลผล... (Max 10s)`);
                         let aiDone = false;
                         for(let i=0; i<20; i++) { // 20 รอบ * 500ms = 10 วิ
                             if (!isAutoPilotOn) return;
-                            if (ta.value.includes('\u200B')) { 
-                                aiDone = true; 
+                            if (ta.value.trim() && ta.value !== beforeValue) {
+                                aiDone = true;
                                 console.log(`✨ Python วางข้อความเสร็จแล้ว!`);
-                                break; 
+                                break;
                             }
                             await delay(500);
                         }
