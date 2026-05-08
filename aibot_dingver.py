@@ -14,6 +14,7 @@ from tkinter import messagebox, simpledialog
 import customtkinter as ctk
 from openai import OpenAI
 import subprocess
+import random
 
 # ==========================================
 # Import Prompts และ UI จากไฟล์แยก
@@ -43,7 +44,7 @@ GITHUB_REPO_OWNER    = "Denbie"
 GITHUB_REPO_NAME     = "DingTag-C-Update"
 GITHUB_API_BASE      = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}"
 RAW_FILE_NAME        = os.path.basename(__file__)
-CURRENT_VERSION      = "2.8.0.1a"
+CURRENT_VERSION      = "3.0A"
 UPDATE_CHECK_TIMEOUT = 12
 
 # ==========================================
@@ -621,6 +622,75 @@ class AITranscriberApp(AppUI, ctk.CTk):
             text = text.replace(ch, '')
         return text
 
+    def _is_transient_connection_error(self, e: Exception) -> bool:
+        msg = str(e).lower()
+        needles = [
+            "connection error",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "remote disconnected",
+            "connection aborted",
+            "connection reset",
+            "ssl",
+        ]
+        return any(n in msg for n in needles)
+
+    def _transcribe_audio_with_retry(self, prompt: str, audio_b64: str) -> str:
+        """
+        Retry OpenRouter call when intermittent network/provider errors happen.
+        - Reuses the same audio bytes (no need to re-download).
+        - Falls back to another audio model if the current one keeps failing.
+        """
+        # Try current model first, then a few fallbacks (dedup while keeping order)
+        model_candidates = []
+        if self.audio_model:
+            model_candidates.append(self.audio_model)
+        for m in OPENROUTER_AUDIO_MODELS:
+            if m not in model_candidates:
+                model_candidates.append(m)
+
+        last_err: Exception | None = None
+        for model_idx, model_name in enumerate(model_candidates[:3]):  # keep bounded
+            # 3 attempts per model
+            for attempt in range(1, 4):
+                try:
+                    if attempt > 1:
+                        print(f"[🔁] Retry {attempt}/3 (model: {model_name})...")
+                    return client.chat.completions.create(
+                        model=model_name,
+                        max_tokens=500,
+                        temperature=0.2,
+                        timeout=30,
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "input_audio", "input_audio": {"data": audio_b64, "format": "wav"}},
+                            ]
+                        }],
+                    ).choices[0].message.content or ""
+                except Exception as e:
+                    last_err = e
+                    transient = self._is_transient_connection_error(e)
+                    if not transient:
+                        raise
+
+                    # Backoff with a bit of jitter
+                    sleep_s = min(8.0, (2 ** (attempt - 1))) + random.random() * 0.4
+                    print(f"[⚠️] Connection error: {e} — รอ {sleep_s:.1f}s แล้วลองใหม่")
+                    time.sleep(sleep_s)
+
+            # Model fallback (only if we still have candidates)
+            if model_idx < 2:
+                print(f"[🧩] เปลี่ยนโมเดลชั่วคราวเพื่อแก้ connection error: {model_name} -> {model_candidates[model_idx + 1]}")
+
+        # If all retries failed
+        raise last_err if last_err else RuntimeError("Unknown connection failure")
+
     # ==========================================
     # 8. DingTalk Voice Transcription
     # ==========================================
@@ -672,22 +742,10 @@ class AITranscriberApp(AppUI, ctk.CTk):
             PROMPT_WITH_RULES = DINGTALK_PROMPT + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
 
             print(f"[🤖] กำลังส่งเสียงให้ AI ประมวลผล (โมเดล: {self.audio_model})...")
-            response = client.chat.completions.create(
-                model=self.audio_model,
-                max_tokens=500,
-                temperature=0.2,
-                timeout=30,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text",        "text": PROMPT_WITH_RULES},
-                        {"type": "input_audio", "input_audio": {"data": audio_b64, "format": "wav"}},
-                    ]
-                }]
-            )
+            content = self._transcribe_audio_with_retry(PROMPT_WITH_RULES, audio_b64)
 
             import re
-            result_text = ' '.join(response.choices[0].message.content.strip().split())
+            result_text = ' '.join((content or "").strip().split())
             result_text = re.sub(r'[()]', '', result_text)
 
             if result_text:
