@@ -26,6 +26,7 @@ from prompts import (
     DINGTALK_PROMPT,
     formal_instruction,
     CONTENT_MODERATION_PROMPT,
+    NON_TARGET_LANGUAGE_PROMPT,
 )
 from aibot_gui import AppUI
 
@@ -163,7 +164,12 @@ def api_transcribe(body: TranscribeRequest):
 
         # Step 1 (for Extension): transcribe + basic clean + moderate only (no formalize yet)
         out = inst.run_transcribe_then_moderate(body.audioBase64)
-        print(f"[API] สำเร็จ — isSensitive={out.get('isSensitive')} ความยาวข้อความ={len((out.get('text') or ''))}")
+        qc = out.get("qc") or {}
+        print(
+            f"[API] สำเร็จ — isSensitive={out.get('isSensitive')} "
+            f"nonTarget={qc.get('isNonTarget')} englishRatio={qc.get('englishRatio')} "
+            f"ความยาวข้อความ={len((out.get('text') or ''))}"
+        )
         return out
     except ValueError as e:
         print(f"[API] ผิดพลาด 400: {e}")
@@ -233,6 +239,10 @@ OPENROUTER_TEXT_MODELS = [
 DEFAULT_FORMAL_MODEL = "google/gemini-2.5-flash-lite"
 
 MODERATION_MODEL = "openai/gpt-4o-mini"
+
+# Non-target QC: Latin letters vs Thai letters (rough "English share" of letters).
+DEFAULT_NON_TARGET_ENGLISH_RATIO = 0.60
+DEFAULT_NON_TARGET_GRAY_RATIO_LOW = 0.18
 
 LOCAL_API_HOST = "127.0.0.1"
 LOCAL_API_PORT = 54321
@@ -378,6 +388,38 @@ def parse_moderation_is_sensitive(content: str) -> bool:
     return True
 
 
+def parse_non_target_is_yes(content: str) -> bool:
+    """True = YES (non-target). Ambiguous → False (fail open; avoid false Invalid)."""
+    t = (content or "").strip().upper()
+    m = re.search(r"\b(YES|NO)\b", t)
+    if m:
+        return m.group(1) == "YES"
+    return False
+
+
+def latin_vs_thai_letter_ratio(text: str) -> float:
+    """Share of Latin letters among (Latin + Thai) letters. 0.0 if no such letters."""
+    if not text:
+        return 0.0
+    latin = thai = 0
+    for ch in text:
+        if "A" <= ch <= "Z" or "a" <= ch <= "z":
+            latin += 1
+        elif "\u0e00" <= ch <= "\u0e7f":
+            thai += 1
+    denom = latin + thai
+    if denom <= 0:
+        return 0.0
+    return latin / denom
+
+
+def _qc_defaults() -> dict[str, float]:
+    return {
+        "non_target_english_ratio": DEFAULT_NON_TARGET_ENGLISH_RATIO,
+        "non_target_gray_low": DEFAULT_NON_TARGET_GRAY_RATIO_LOW,
+    }
+
+
 # ==========================================
 # Main app
 # ==========================================
@@ -393,6 +435,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         self.audio_model = DEFAULT_AUDIO_MODEL
         self.formal_model = DEFAULT_FORMAL_MODEL
         self._uvicorn_server = None
+        self.qc_config: dict[str, float] = _qc_defaults()
 
         self.load_config()
         if self.audio_model not in OPENROUTER_AUDIO_MODELS:
@@ -439,6 +482,16 @@ class AITranscriberApp(AppUI, ctk.CTk):
             fm = saved.get("formal_model")
             if isinstance(fm, str) and fm.strip() and fm.strip() in OPENROUTER_TEXT_MODELS:
                 self.formal_model = fm.strip()
+            qc = saved.get("qc")
+            if isinstance(qc, dict):
+                base = _qc_defaults()
+                for key in base:
+                    v = qc.get(key)
+                    if isinstance(v, (int, float)) and 0.0 <= float(v) <= 1.0:
+                        base[key] = float(v)
+                if base["non_target_gray_low"] >= base["non_target_english_ratio"]:
+                    base["non_target_gray_low"] = DEFAULT_NON_TARGET_GRAY_RATIO_LOW
+                self.qc_config = base
         except Exception as e:
             print(f"⚠️ เกิดปัญหาการโหลดการตั้งค่า: {e}")
 
@@ -447,6 +500,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
             data = {
                 "audio_model": self.audio_model,
                 "formal_model": self.formal_model,
+                "qc": {k: float(self.qc_config.get(k, v)) for k, v in _qc_defaults().items()},
             }
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
@@ -483,7 +537,14 @@ class AITranscriberApp(AppUI, ctk.CTk):
         result_text = force_single_line(result_text)
 
         if not result_text:
-            return {"status": "success", "text": "", "isSensitive": False}
+            return {
+                "status": "success",
+                "text": "",
+                "isSensitive": False,
+                "qc": {"isNonTarget": False, "englishRatio": 0.0, "nonTargetSource": "none"},
+            }
+
+        qc = self._classify_non_target_qc(result_text)
 
         max_out = min(8192, max(512, int(len(result_text) * 1.5) + 400))
         formatted_raw = chat_completion_with_retry(
@@ -518,6 +579,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
             "status": "success",
             "text": formatted,
             "isSensitive": is_sensitive,
+            "qc": qc,
         }
 
     def _moderate_text(self, text: str) -> bool:
@@ -533,6 +595,37 @@ class AITranscriberApp(AppUI, ctk.CTk):
             timeout=30,
         )
         return parse_moderation_is_sensitive(mod_raw)
+
+    def _classify_non_target_qc(self, result_text: str) -> dict[str, Any]:
+        """Heuristic English share + MODERATION_MODEL + NON_TARGET_LANGUAGE_PROMPT in gray zone."""
+        cfg = getattr(self, "qc_config", None) or _qc_defaults()
+        th = float(cfg.get("non_target_english_ratio", DEFAULT_NON_TARGET_ENGLISH_RATIO))
+        low = float(cfg.get("non_target_gray_low", DEFAULT_NON_TARGET_GRAY_RATIO_LOW))
+        ratio = latin_vs_thai_letter_ratio(result_text)
+        is_non_target = False
+        source: str | None = "none"
+        if ratio >= th:
+            is_non_target = True
+            source = "english_ratio"
+        elif ratio >= low:
+            raw = chat_completion_with_retry(
+                client,
+                [MODERATION_MODEL],
+                messages=[
+                    {"role": "system", "content": NON_TARGET_LANGUAGE_PROMPT},
+                    {"role": "user", "content": (result_text or "")[:8000]},
+                ],
+                temperature=0.0,
+                max_tokens=16,
+                timeout=30,
+            )
+            is_non_target = parse_non_target_is_yes(raw)
+            source = "llm" if is_non_target else "none"
+        return {
+            "isNonTarget": is_non_target,
+            "englishRatio": round(ratio, 4),
+            "nonTargetSource": source,
+        }
 
     def run_transcribe_then_moderate(self, audio_b64: str) -> dict:
         """Step 1: ASR + basic cleaning + moderation (NO formalize)."""
@@ -558,10 +651,21 @@ class AITranscriberApp(AppUI, ctk.CTk):
         result_text = force_single_line(result_text)
 
         if not result_text:
-            return {"status": "success", "text": "", "isSensitive": False}
+            return {
+                "status": "success",
+                "text": "",
+                "isSensitive": False,
+                "qc": {"isNonTarget": False, "englishRatio": 0.0, "nonTargetSource": "none"},
+            }
 
         is_sensitive = self._moderate_text(result_text)
-        return {"status": "success", "text": result_text, "isSensitive": is_sensitive}
+        qc = self._classify_non_target_qc(result_text)
+        if qc.get("isNonTarget"):
+            print(
+                f"[API] QC Non-Target: englishRatio={qc.get('englishRatio')} "
+                f"source={qc.get('nonTargetSource')}"
+            )
+        return {"status": "success", "text": result_text, "isSensitive": is_sensitive, "qc": qc}
 
     def run_formalize_only(self, text: str) -> dict:
         """Step 2: formalize only (expects raw already shown to user)."""
@@ -625,9 +729,16 @@ class AITranscriberApp(AppUI, ctk.CTk):
             _job_update(job_id, step="transcribed", message="ถอดเสียงเสร็จแล้ว", textLen=len(result_text))
 
             if not result_text:
-                out = {"status": "success", "text": "", "isSensitive": False}
+                out = {
+                    "status": "success",
+                    "text": "",
+                    "isSensitive": False,
+                    "qc": {"isNonTarget": False, "englishRatio": 0.0, "nonTargetSource": "none"},
+                }
                 _job_update(job_id, status="success", step="done", message="เสร็จสิ้น (ไม่มีข้อความ)", finishedAt=time.time(), result=out, isSensitive=False)
                 return
+
+            qc = self._classify_non_target_qc(result_text)
 
             _job_update(job_id, step="format", message="กำลังจัดข้อความให้เป็นทางการ...")
             max_out = min(8192, max(512, int(len(result_text) * 1.5) + 400))
@@ -660,7 +771,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 timeout=30,
             )
             is_sensitive = parse_moderation_is_sensitive(mod_raw)
-            out = {"status": "success", "text": formatted, "isSensitive": is_sensitive}
+            out = {"status": "success", "text": formatted, "isSensitive": is_sensitive, "qc": qc}
             _job_update(
                 job_id,
                 status="success",

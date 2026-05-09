@@ -8,6 +8,7 @@ let isProcessing = false;
 let readDelay = 1500;
 let moveDelay = 8000;
 let sensitiveFilterEnabled = localStorage.getItem("dingtag_sensitive_filter_enabled") !== "0";
+let nonTargetAutoInvalidEnabled = localStorage.getItem("dingtag_non_target_auto_invalid") !== "0";
 let activeTimeouts = [];
 let lastNoTargetLogAt = 0;
 let runTokenCounter = 0;
@@ -140,7 +141,19 @@ async function postTranscribe(audioBase64) {
         };
     }
 
-    console.log("[DingTag] API ตอบกลับ:", data.status, "| isSensitive:", data.isSensitive);
+    const qc = data.qc || {};
+    console.log(
+        "[DingTag] API ตอบกลับ:",
+        data.status,
+        "| isSensitive:",
+        data.isSensitive,
+        "| nonTarget:",
+        qc.isNonTarget,
+        "englishRatio:",
+        qc.englishRatio,
+        "source:",
+        qc.nonTargetSource
+    );
     return { ok: true, data };
 }
 
@@ -325,6 +338,41 @@ sensitiveToggle.addEventListener("change", () => {
     );
 });
 
+const nonTargetRow = document.createElement("div");
+nonTargetRow.style.display = "flex";
+nonTargetRow.style.alignItems = "center";
+nonTargetRow.style.justifyContent = "space-between";
+nonTargetRow.style.gap = "8px";
+nonTargetRow.style.marginTop = "10px";
+settingsContainer.appendChild(nonTargetRow);
+
+const nonTargetLabel = document.createElement("label");
+nonTargetLabel.innerText = "🌐 Auto Invalid (Non-Target)";
+nonTargetLabel.style.fontSize = "12px";
+nonTargetLabel.style.cursor = "pointer";
+nonTargetRow.appendChild(nonTargetLabel);
+
+const nonTargetToggle = document.createElement("input");
+nonTargetToggle.type = "checkbox";
+nonTargetToggle.checked = nonTargetAutoInvalidEnabled;
+nonTargetToggle.style.cursor = "pointer";
+nonTargetToggle.title = "เมื่อ API ตรวจว่า Non-Target → กด Invalid + Non-Target Language";
+nonTargetRow.appendChild(nonTargetToggle);
+
+nonTargetLabel.addEventListener("click", () => {
+    nonTargetToggle.checked = !nonTargetToggle.checked;
+    nonTargetToggle.dispatchEvent(new Event("change"));
+});
+
+nonTargetToggle.addEventListener("change", () => {
+    nonTargetAutoInvalidEnabled = nonTargetToggle.checked;
+    localStorage.setItem("dingtag_non_target_auto_invalid", nonTargetAutoInvalidEnabled ? "1" : "0");
+    console.log(
+        "[DingTag] Non-target auto-invalid:",
+        nonTargetAutoInvalidEnabled ? "ON" : "OFF"
+    );
+});
+
 panel.appendChild(settingsContainer);
 document.body.appendChild(panel);
 
@@ -451,16 +499,18 @@ async function clickByContainsTextAndVerify(needles, { tries = 6, intervalMs = 3
     return { ok: false, reason: "not_found" };
 }
 
-function findDataMissingCheckbox() {
-    // From user DOM: <input ... name="Data Missing" class="ant-checkbox-input" type="checkbox">
-    const sel = 'input.ant-checkbox-input[type="checkbox"][name="Data Missing"]';
-    return document.querySelector(sel);
+function findAntCheckboxByName(checkboxName) {
+    if (!checkboxName || typeof checkboxName !== "string") return null;
+    if (/["\\]/.test(checkboxName)) return null;
+    return document.querySelector(
+        'input.ant-checkbox-input[type="checkbox"][name="' + checkboxName + '"]'
+    );
 }
 
-async function clickDataMissingCheckboxAndVerify({ tries = 10, intervalMs = 350 } = {}) {
+async function clickAntCheckboxByNameAndVerify(checkboxName, { tries = 12, intervalMs = 350, logLabel = "checkbox" } = {}) {
     for (let i = 1; i <= tries; i++) {
         if (!isAutoPilotOn) return { ok: false, reason: "autopilot_off" };
-        const cb = findDataMissingCheckbox();
+        const cb = findAntCheckboxByName(checkboxName);
         if (!cb) {
             await delay(intervalMs);
             continue;
@@ -470,7 +520,7 @@ async function clickDataMissingCheckboxAndVerify({ tries = 10, intervalMs = 350 
             cb.scrollIntoView?.({ block: "center", inline: "center" });
         } catch {}
         try {
-            console.log(`[DingTag] click Data Missing checkbox ${i}/${tries}`);
+            console.log(`[DingTag] click ${logLabel} checkbox ${i}/${tries}`);
             cb.click();
         } catch (e) {
             console.warn("[DingTag] click checkbox error:", e?.name, e?.message);
@@ -536,10 +586,12 @@ async function waitForSelector(selector, { timeoutMs = 8000, intervalMs = 200 } 
     return null;
 }
 
-async function runInvalidDataMissingAcceptFlow(reasonText = "invalid flow") {
-    console.log(`🚩 ${reasonText}: พยายามกด Invalid -> Data Missing -> Accept/Fix + Accept`);
+async function runInvalidReasonAcceptFlow(
+    reasonText = "invalid flow",
+    { checkboxName, menuNeedles, logLabel = "reason" }
+) {
+    console.log(`🚩 ${reasonText}: Invalid -> ${logLabel} -> Accept/Fix + Accept`);
 
-    // 1) Click Invalid (prefer exact, fallback contains)
     if (forceClickByText(["Invalid"]) || (await clickByContainsTextAndVerify(["invalid"])).ok) {
         console.log("✅ กด Invalid สำเร็จ");
     } else {
@@ -548,19 +600,22 @@ async function runInvalidDataMissingAcceptFlow(reasonText = "invalid flow") {
         return;
     }
 
-    // 2) Wait for the reason menu to appear, then click Data Missing (contains match)
     await delay(300);
-    // Try to click the menu item (opens checkbox list) then click checkbox itself
-    await clickByContainsTextAndVerify(["data missing", "datamissing"], { tries: 10, intervalMs: 350 });
-    const dmCb = await clickDataMissingCheckboxAndVerify({ tries: 12, intervalMs: 350 });
-    if (!dmCb.ok) {
-        console.warn("⚠️ Data Missing checkbox ไม่ถูกติ๊ก (ค้าง/หาไม่เจอ):", dmCb.reason);
-        setStatus("Invalid flow: ติ๊ก Data Missing ไม่สำเร็จ");
+    if (menuNeedles && menuNeedles.length) {
+        await clickByContainsTextAndVerify(menuNeedles, { tries: 10, intervalMs: 350 });
+    }
+    const cbRes = await clickAntCheckboxByNameAndVerify(checkboxName, {
+        tries: 12,
+        intervalMs: 350,
+        logLabel,
+    });
+    if (!cbRes.ok) {
+        console.warn(`⚠️ ติ๊ก ${logLabel} ไม่สำเร็จ:`, cbRes.reason);
+        setStatus(`Invalid flow: ติ๊ก ${logLabel} ไม่สำเร็จ`);
         return;
     }
-    console.log("✅ ติ๊ก Data Missing สำเร็จ");
+    console.log(`✅ ติ๊ก ${logLabel} สำเร็จ`);
 
-    // 3) Accept
     await delay(350);
     if (forceClickByText(["Fix + Accept", "Accept"]) || (await clickByContainsTextAndVerify(["fix + accept", "accept"], { tries: 10, intervalMs: 350 })).ok) {
         console.log("✅ กด Fix + Accept/Accept สำเร็จ");
@@ -569,6 +624,22 @@ async function runInvalidDataMissingAcceptFlow(reasonText = "invalid flow") {
         console.warn("⚠️ ไม่พบปุ่ม Accept/Fix + Accept");
         setStatus("Invalid flow: ไม่พบปุ่ม Accept");
     }
+}
+
+async function runInvalidDataMissingAcceptFlow(reasonText = "invalid flow") {
+    return runInvalidReasonAcceptFlow(reasonText, {
+        checkboxName: "Data Missing",
+        menuNeedles: ["data missing", "datamissing"],
+        logLabel: "Data Missing",
+    });
+}
+
+async function runInvalidNonTargetLanguageAcceptFlow(reasonText = "non-target language") {
+    return runInvalidReasonAcceptFlow(reasonText, {
+        checkboxName: "Non-Target Language",
+        menuNeedles: ["non-target", "non target language", "nontarget language", "non target", "nontarget"],
+        logLabel: "Non-Target Language",
+    });
 }
 
 setInterval(() => {
@@ -671,6 +742,20 @@ setInterval(() => {
                             console.warn("⚠️ เนื้อหาอ่อนไหว (Politics/War/Monarchy) — ข้ามการวางข้อความ และคงค่าเดิมไว้");
                             setStatus("Sensitive — ส่ง invalid flow");
                             await runInvalidDataMissingAcceptFlow("Sensitive content");
+                            return;
+                        }
+
+                        const qc = data.qc || {};
+                        if (nonTargetAutoInvalidEnabled && qc.isNonTarget === true) {
+                            console.warn(
+                                "⚠️ QC Non-Target — englishRatio:",
+                                qc.englishRatio,
+                                "source:",
+                                qc.nonTargetSource,
+                                "— ข้ามการวางข้อความ และคงค่าเดิมไว้"
+                            );
+                            setStatus("Non-Target — ส่ง invalid flow");
+                            await runInvalidNonTargetLanguageAcceptFlow("Non-target language (QC)");
                             return;
                         }
                         // Step A: วาง raw transcript ก่อน เพื่อให้มั่นใจว่า "ดูดเสียงมาจริง"

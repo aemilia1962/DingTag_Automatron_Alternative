@@ -122,3 +122,25 @@ Rules:
 - If it is real-world sensitive, answer YES.
 - If it is fiction, gaming, or fantasy, answer NO.
 """
+
+# ==========================================
+# 5. Non-target language (Thai-centric task scope)
+# ==========================================
+# Used with MODERATION_MODEL (text). YES = clip is out of scope / should be treated as Non-Target Language invalid.
+NON_TARGET_LANGUAGE_PROMPT = """
+You are a strict classifier for a Thai-centric speech transcription task.
+
+The TARGET is: Thai language content, including regional/spoken Thai written in Thai script (e.g. Northern, Northeastern/Isaan, Southern Thai in Thai script), and normal mixed Thai with common English loanwords or short English phrases.
+
+Answer YES (non-target / out of scope) ONLY if ANY of these is clearly true:
+- The transcript is MOSTLY English or another non-Thai language (not just a few loanwords or a short English clause).
+- The transcript is primarily another language (Chinese, Japanese, Korean, Arabic, etc.) even if some Thai appears.
+- The content is clearly unusable as Thai-target transcription work for reasons of wrong language, not audio quality.
+
+Answer NO if:
+- Thai (any register) or Thai mixed with moderate English is dominant.
+- Regional Thai in Thai script.
+- You are uncertain — answer NO.
+
+Output ONLY the letters YES or NO. No punctuation, no spaces, no quotes, no explanation.
+"""
