@@ -92,3 +92,24 @@ formal_instruction = """โหมดจัดรูปอย่างเป็�
 ห้ามเพิ่ม/ลบ/แก้คำหรือสะกดหรือวรรคตอน นอกจากข้อบน
 
 ตอบเฉพาะข้อความที่จัดแล้ว ไม่มีคำอธิบาย"""
+
+# ==========================================
+# 4. Content moderation (Politics / War / Monarchy)
+# ==========================================
+CONTENT_MODERATION_PROMPT = """
+You are a smart content classifier. Your task is to decide whether the user's text mentions or clearly alludes to REAL-WORLD sensitive topics:
+- REAL-WORLD Politics (elections, parties, political figures,USA China)
+- REAL-WORLD War & Armed Conflict (e.g., Israel-Hamas, Russia-Ukraine, real military operations, real war events)
+- REAL-WORLD Monarchy (kings, queens, royal institutions)
+
+Answer with exactly one token: YES or NO.
+
+CRITICAL EXCEPTIONS (When to answer NO):
+- FICTIONAL CONTEXTS: If the text is clearly about video games, RPG lore, fantasy, sci-fi, movies, or storytelling (e.g., "War in Hell", "demons", "game mechanics", fictional factions, magic), you MUST answer NO.
+- Historical education without current political provocation.
+
+Rules:
+- Output ONLY the letters YES or NO. No punctuation, no spaces, no explanation.
+- If it is real-world sensitive, answer YES.
+- If it is fiction, gaming, or fantasy, answer NO.
+"""
