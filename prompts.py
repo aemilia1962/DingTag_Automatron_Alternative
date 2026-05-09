@@ -19,6 +19,7 @@ You are a verbatim transcription engine. Write down EXACTLY what was spoken — 
 - STRICT GENDER PARTICLES: ห้ามสลับเพศของคำลงท้ายเด็ดขาด! ถ้าเสียงคือ "ค่ะ/นะคะ/คะ" ต้องพิมพ์ "ค่ะ/นะคะ/คะ" ห้ามแก้เป็น "ครับ/นะครับ" (และในทางกลับกันด้วย)
 
 ## OUTPUT RULES:
+- Thai text: เขียนติดกันตามการสะกดปกติ — ห้ามเว้นวรรคทุกคำ/ทุกพยางค์แบบ "และ ค่าย ยาน ยนต์" (ASR spacing leak)
 - Single continuous paragraph — ห้ามขึ้นบรรทัดใหม่
 - NO timestamps (00:00, 00:01 etc.) — ห้ามสร้าง timestamp
 - Keep filler words verbatim (e.g., เอ่อ, อ่า, อืม, แบบว่า, ครับ, ค่ะ, นะคะ, นะครับ)
@@ -69,28 +70,25 @@ transcript_instruction = """
 
 รูปแบบคำตอบ:
 แสดงเฉพาะข้อความสุดท้ายเท่านั้น ห้ามมีคำอธิบายเพิ่มเติม
+
+ตัวอย่าง (รวมพยางค์ที่แตก แล้วเว้นวรรคคั่นระหว่างวลีใหญ่ — ไม่เว้นทุกพยางค์):
+INPUT: เรื่อง นี้ สำคัญ มาก ครับ และ ต้อง ทำ ภายใน สัปดาห์ นี้
+OUTPUT: เรื่องนี้สำคัญมากครับ และต้องทำภายในสัปดาห์นี้
 """
 
 # ==========================================
 # 3. Formal Text Spacing Instruction
 # ==========================================
-formal_instruction = """
-Act as a professional Thai Spacing and English Capitalization Editor.
-Your ONLY goals:
-1. Fix the spacing (เว้นวรรค) of the text according to standard Thai readability rules.
-2. If you encounter an English sentence or clause, capitalize the first letter of that sentence/clause.
+# โหมด formal: สั้นเพื่อลด input tokens ทุกครั้งที่เรียก API (เนื้อหาสำคัญยังครบ)
+formal_instruction = """โหมดจัดรูปอย่างเป็นทางการ
 
-กฎตัวเลขและจำนวน:
-• แปลงจำนวนเป็นเลขอารบิก (0-9) ทั้งหมด
-• NO FRACTIONS: ห้ามแปลงคำว่า "ครึ่ง" หรือ "เสี้ยว" เป็นเศษส่วน 1/2 หรือ 0.5 เด็ดขาด (ตัวอย่าง: "ชั่วโมงครึ่ง" ให้เขียน "1 ชั่วโมงครึ่ง" ห้ามเขียน "1 1/2")
-• ห้ามแปลงคำถามจำนวน เช่น "กี่" เป็นตัวเลข
-• "ปี ค.ศ. หนึ่งเก้าศูนย์เก้า "ต้องเขียนเป็น "ปี ค.ศ. 1990" ห้ามตัด ค.ศ. ออก
+ทำได้เท่านี้:
+• ไทย: จัดเว้นวรรคให้อ่านง่ายตามมาตรฐานทั่วไป
+• ไม้ยมก ๆ: เขียนติดคำเดิม ห้ามเว้นวรรค (เช่น จริงๆ มากๆ ไม่ใช่ จริง ๆ)
+• อังกฤษ: ขึ้นต้นประโยค/วลีด้วยตัวใหญ่ (sentence case ตามจุดเริ่มประโยคหรือวลี)
 
-DO NOT change, add, or remove any words, spelling, numbers, or punctuation marks beyond these two rules.
+ตัวเลข: จำนวน→เลขอารบิก | ห้ามครึ่ง/เสี้ยว→1/2 หรือ 0.5 | ห้ามแปลงคำว่ากี่ | พูดปี ค.ศ. เป็นคำ→เขียน ปี ค.ศ. + เลขปีอารบิก
 
-CRITICAL RULES:
-- FIX SPACING ONLY (Thai text)
-- CAPITALIZE FIRST LETTER OF ENGLISH SENTENCES ONLY
-- NEVER REMOVE OR ADD WORDS
-- NEVER ALTER SPELLING OR PUNCTUATION
-"""
+ห้ามเพิ่ม/ลบ/แก้คำหรือสะกดหรือวรรคตอน นอกจากข้อบน
+
+ตอบเฉพาะข้อความที่จัดแล้ว ไม่มีคำอธิบาย"""

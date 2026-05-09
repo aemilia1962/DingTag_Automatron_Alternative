@@ -220,13 +220,34 @@ class AppUI:
         elif action_key == "dingtalk_voice":
             frame = ctk.CTkFrame(self.hotkey_frame, fg_color="transparent")
             frame.grid(row=row + 1, column=0, columnspan=4, sticky="ew", padx=10, pady=8)
-            ctk.CTkLabel(frame, text="เลือกโมเดล AI:", font=ctk.CTkFont(size=12)).pack(side="left")
+            row_top = ctk.CTkFrame(frame, fg_color="transparent")
+            row_top.pack(fill="x")
+            ctk.CTkLabel(row_top, text="เลือกโมเดล AI:", font=ctk.CTkFont(size=12)).pack(side="left")
             self.audio_model_dropdown = ctk.CTkComboBox(
-                frame, values=OPENROUTER_AUDIO_MODELS, state="readonly",
+                row_top, values=OPENROUTER_AUDIO_MODELS, state="readonly",
                 command=self._on_audio_model_change, width=150
             )
             self.audio_model_dropdown.set(self.audio_model)
             self.audio_model_dropdown.pack(side="right", fill="x", expand=True)
+
+            row_delay = ctk.CTkFrame(frame, fg_color="transparent")
+            row_delay.pack(fill="x", pady=(10, 0))
+            ctk.CTkLabel(
+                row_delay,
+                text="รอก่อน Formal (หลังวางถอดเสียง):",
+                font=ctk.CTkFont(size=12),
+            ).pack(side="left")
+            self.dingtalk_formal_value_label = ctk.CTkLabel(
+                row_delay, text=f"{float(self.dingtalk_formal_settle_delay):.1f} วิ",
+                font=ctk.CTkFont(size=12, weight="bold"), text_color="#1abc9c", width=52,
+            )
+            self.dingtalk_formal_value_label.pack(side="right", padx=(8, 0))
+            self.dingtalk_formal_slider = ctk.CTkSlider(
+                row_delay, from_=0.2, to=5.0, number_of_steps=48, width=140,
+                command=self._on_dingtalk_formal_slider,
+            )
+            self.dingtalk_formal_slider.set(float(self.dingtalk_formal_settle_delay))
+            self.dingtalk_formal_slider.pack(side="right", fill="x", expand=True, padx=(8, 0))
 
     # ==========================================
     # ฝั่งขวา: Terminal Log
@@ -306,6 +327,14 @@ class AppUI:
         self.log_console.delete("1.0", "end")
         self.log_console.configure(state="disabled")
         print("🧹 ล้างประวัติ Terminal แล้ว")
+
+    def _on_dingtalk_formal_slider(self, value):
+        self.dingtalk_formal_settle_delay = max(0.2, min(10.0, float(value)))
+        if hasattr(self, "dingtalk_formal_value_label"):
+            self.dingtalk_formal_value_label.configure(
+                text=f"{self.dingtalk_formal_settle_delay:.1f} วิ"
+            )
+        self.save_config()
 
     def _update_button_reset(self):
         from aibot_dingver import CURRENT_VERSION

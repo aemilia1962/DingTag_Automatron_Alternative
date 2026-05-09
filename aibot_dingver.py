@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import time
@@ -93,6 +94,8 @@ class AITranscriberApp(AppUI, ctk.CTk):
         self.audio_model          = DEFAULT_AUDIO_MODEL
         self.raw_model            = DEFAULT_RAW_MODEL
         self.formal_model         = DEFAULT_RAW_MODEL
+        # หลังวางข้อความถอดเสียง DingTalk รอกี่วินาทีก่อนรัน Formal (ให้ textarea นิ่ง / โฟกัสพร้อม)
+        self.dingtalk_formal_settle_delay = 1.0
 
         self.load_config()
         self.setup_window(resource_path)   # จาก AppUI
@@ -123,6 +126,11 @@ class AITranscriberApp(AppUI, ctk.CTk):
             if "audio_model"  in saved: self.audio_model  = saved["audio_model"]
             if "raw_model"    in saved: self.raw_model    = saved["raw_model"]
             if "formal_model" in saved: self.formal_model = saved["formal_model"]
+            if "dingtalk_formal_settle_delay" in saved:
+                try:
+                    self.dingtalk_formal_settle_delay = max(0.2, min(10.0, float(saved["dingtalk_formal_settle_delay"])))
+                except (TypeError, ValueError):
+                    pass
         except Exception as e:
             print(f"⚠️ เกิดปัญหาการโหลดการตั้งค่า: {e}")
 
@@ -133,6 +141,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
             data["audio_model"]    = self.audio_model
             data["raw_model"]      = self.raw_model
             data["formal_model"]   = self.formal_model
+            data["dingtalk_formal_settle_delay"] = float(self.dingtalk_formal_settle_delay)
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
         except Exception as e:
@@ -584,8 +593,13 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 print("⚠️ ไม่พบข้อความที่เลือก")
                 return
 
+            text = self._collapse_overspaced_thai(text)
+
             system_prompt = formal_instruction if mode == "formal" else transcript_instruction
             model_to_use  = self.formal_model  if mode == "formal" else self.raw_model
+
+            # จำกัด completion tokens — งานจัดรูปความยาวผลลัพธ์ใกล้กับ input; ลดค่าใช้จ่าย output
+            max_out = min(8192, max(512, int(len(text) * 1.5) + 400))
 
             response = client.chat.completions.create(
                 model=model_to_use,
@@ -593,10 +607,13 @@ class AITranscriberApp(AppUI, ctk.CTk):
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": text},
                 ],
-                temperature=0.1
+                temperature=0.1,
+                max_tokens=max_out,
             )
             result = response.choices[0].message.content.strip().replace("-", " ")
             result = self._strip_special_chars(result)
+            # ไม่เรียก _collapse_overspaced_thai ที่ผลลัพธ์ — จะลบช่องว่างระหว่างตัวอักษรไทยทุกคู่
+            # ทำให้การจัดเว้นวรรคจากโมเดลหายไป (ดูเหมือน AI ไม่จัดคำ)
 
             pyperclip.copy(result)
             time.sleep(0.15)
@@ -621,6 +638,20 @@ class AITranscriberApp(AppUI, ctk.CTk):
         for ch in ['"', "'", ':', '：', '(', ')']:
             text = text.replace(ch, '')
         return text
+
+    def _collapse_overspaced_thai(self, text: str) -> str:
+        """
+        ลบช่องว่างระหว่างตัวอักษรในบล็อกไทยติดกัน (อาการถอดเสียง/ข้อความที่เว้นทุกคำ)
+        คงช่องว่างคั่นไทย–เลข–ละติน–เครื่องหมายตามเดิม
+
+        ใช้กับข้อความดิบก่อนส่งโมเดลจัดรูปแบบเท่านั้น — ห้ามใช้กับข้อความที่จัดเว้นวรรคแล้ว
+        เพราะจะลบช่องว่างระหว่างคำไทยที่ถูกต้องด้วย
+        """
+        if not text:
+            return text
+        thai = r"[\u0E00-\u0E7F]"
+        out = re.sub(rf"(?<={thai})\s+(?={thai})", "", text)
+        return re.sub(r" +", " ", out).strip()
 
     def _is_transient_connection_error(self, e: Exception) -> bool:
         msg = str(e).lower()
@@ -744,9 +775,9 @@ class AITranscriberApp(AppUI, ctk.CTk):
             print(f"[🤖] กำลังส่งเสียงให้ AI ประมวลผล (โมเดล: {self.audio_model})...")
             content = self._transcribe_audio_with_retry(PROMPT_WITH_RULES, audio_b64)
 
-            import re
             result_text = ' '.join((content or "").strip().split())
             result_text = re.sub(r'[()]', '', result_text)
+            result_text = self._collapse_overspaced_thai(result_text)
 
             if result_text:
                 pyperclip.copy(result_text)
@@ -765,7 +796,13 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 ctypes.windll.user32.keybd_event(0x56, 0, 0, 0)
                 ctypes.windll.user32.keybd_event(0x56, 0, 2, 0)
                 ctypes.windll.user32.keybd_event(0x11, 0, 2, 0)
-                print("🎉 ดูดเสียงและวางข้อความ สำเร็จ!")
+                print("🎉 ดูดเสียงและวางข้อความ (ดิบ) สำเร็จ!")
+
+                settle = max(0.2, min(10.0, float(getattr(self, "dingtalk_formal_settle_delay", 1.0))))
+                print(f"[⏳] รอ {settle:.1f} วิ แล้วส่ง Formal จัดช่องว่าง/รูปแบบ (เหมือนกดคีย์ลัด Formal)...")
+                time.sleep(settle)
+                self.process_and_paste("formal")
+                print("🎉 ดูดเสียง → Formal วางข้อความครบแล้ว!")
 
                 try: os.remove(DINGTALK_WAV)
                 except Exception: pass
