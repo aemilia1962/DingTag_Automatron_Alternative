@@ -57,8 +57,20 @@ class AppUI:
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        if os.path.exists(resource_path_fn("app_icon.ico")):
-            self.iconbitmap(resource_path_fn("app_icon.ico"))
+        _gui_dir = os.path.dirname(os.path.abspath(__file__))
+        for candidate in (
+            resource_path_fn("Automatron.ico"),
+            os.path.join(_gui_dir, "Automatron.ico"),
+            resource_path_fn("app_icon.ico"),
+            os.path.join(_gui_dir, "app_icon.ico"),
+        ):
+            if os.path.isfile(candidate):
+                try:
+                    self.iconbitmap(candidate)
+                except Exception:
+                    pass
+                else:
+                    break
 
         self.protocol("WM_DELETE_WINDOW", self.quit_app)
 
