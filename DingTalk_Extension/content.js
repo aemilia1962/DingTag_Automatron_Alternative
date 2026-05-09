@@ -10,11 +10,14 @@ let moveDelay = 8000;
 let sensitiveFilterEnabled = localStorage.getItem("dingtag_sensitive_filter_enabled") !== "0";
 let activeTimeouts = [];
 let lastNoTargetLogAt = 0;
+let runTokenCounter = 0;
+let activeRunToken = 0;
 
 function clearAllTasks() {
     activeTimeouts.forEach(t => clearTimeout(t));
     activeTimeouts = [];
     isProcessing = false;
+    activeRunToken = 0;
     console.log("🛑 Kill Switch: ยกเลิกการกระทำทั้งหมด!");
 }
 
@@ -28,6 +31,23 @@ function setTextareaValueAndNotify(ta, value) {
     }
     ta.dispatchEvent(new Event("input", { bubbles: true }));
     ta.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function isRunActive(runToken) {
+    return isAutoPilotOn && isProcessing && runToken === activeRunToken;
+}
+
+function safeSetTextarea(runToken, ta, value, label = "textbox") {
+    if (!isRunActive(runToken)) {
+        console.warn("[DingTag] Skip write (stale run):", label);
+        return false;
+    }
+    if (!ta || !document.contains(ta)) {
+        console.warn("[DingTag] Skip write (textarea gone):", label);
+        return false;
+    }
+    setTextareaValueAndNotify(ta, value);
+    return true;
 }
 
 async function fetchAudioAsBase64() {
@@ -380,6 +400,88 @@ function isKeywordPresentOnPage(keywords) {
     return false;
 }
 
+function findClickableByContainsText(needles) {
+    const lowerNeedles = needles.map((s) => String(s).toLowerCase());
+    const norm = (s) =>
+        String(s || "")
+            .replace(/\s+/g, " ")
+            .replace(/\[\s*\d+\s*\]/g, "") // remove hint like [7]
+            .trim()
+            .toLowerCase();
+
+    // Search broadly (menu items are often nested spans with <sup>[n]</sup>)
+    const all = document.querySelectorAll("*");
+    for (const el of all) {
+        const raw = (el.innerText || el.textContent || "").trim();
+        if (!raw) continue;
+        const tl = norm(raw);
+        if (!tl) continue;
+        if (!lowerNeedles.some((n) => tl.includes(n))) continue;
+
+        // Prefer clicking a meaningful ancestor
+        const clickable =
+            el.closest?.('button, [role="button"], [role="menuitem"], li, a, [tabindex]') || el;
+        return clickable;
+    }
+    return null;
+}
+
+async function clickByContainsTextAndVerify(needles, { tries = 6, intervalMs = 350 } = {}) {
+    for (let i = 1; i <= tries; i++) {
+        if (!isAutoPilotOn) return { ok: false, reason: "autopilot_off" };
+        const el = findClickableByContainsText(needles);
+        if (!el) {
+            await delay(intervalMs);
+            continue;
+        }
+        try {
+            el.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+        try {
+            console.log(`[DingTag] click contains attempt ${i}/${tries}:`, needles.join("/"));
+            el.click();
+            const parentBtn = el.closest?.('button, [role="button"]');
+            if (parentBtn && parentBtn !== el) parentBtn.click();
+            return { ok: true, reason: "clicked" };
+        } catch (e) {
+            console.warn("[DingTag] click contains error:", e?.name, e?.message);
+        }
+        await delay(intervalMs);
+    }
+    return { ok: false, reason: "not_found" };
+}
+
+function findDataMissingCheckbox() {
+    // From user DOM: <input ... name="Data Missing" class="ant-checkbox-input" type="checkbox">
+    const sel = 'input.ant-checkbox-input[type="checkbox"][name="Data Missing"]';
+    return document.querySelector(sel);
+}
+
+async function clickDataMissingCheckboxAndVerify({ tries = 10, intervalMs = 350 } = {}) {
+    for (let i = 1; i <= tries; i++) {
+        if (!isAutoPilotOn) return { ok: false, reason: "autopilot_off" };
+        const cb = findDataMissingCheckbox();
+        if (!cb) {
+            await delay(intervalMs);
+            continue;
+        }
+        if (cb.checked) return { ok: true, reason: "already_checked" };
+        try {
+            cb.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+        try {
+            console.log(`[DingTag] click Data Missing checkbox ${i}/${tries}`);
+            cb.click();
+        } catch (e) {
+            console.warn("[DingTag] click checkbox error:", e?.name, e?.message);
+        }
+        await delay(120);
+        if (cb.checked) return { ok: true, reason: "checked" };
+        await delay(intervalMs);
+    }
+    return { ok: false, reason: "not_checked" };
+}
+
 async function clickPopupAndVerify(keywords, { tries = 6, intervalMs = 450, waitDisappearMs = 1800 } = {}) {
     // Goal: ensure the popup button is actually clicked and disappears.
     for (let i = 1; i <= tries; i++) {
@@ -437,7 +539,8 @@ async function waitForSelector(selector, { timeoutMs = 8000, intervalMs = 200 } 
 async function runInvalidDataMissingAcceptFlow(reasonText = "invalid flow") {
     console.log(`🚩 ${reasonText}: พยายามกด Invalid -> Data Missing -> Accept/Fix + Accept`);
 
-    if (forceClickByText(["Invalid"])) {
+    // 1) Click Invalid (prefer exact, fallback contains)
+    if (forceClickByText(["Invalid"]) || (await clickByContainsTextAndVerify(["invalid"])).ok) {
         console.log("✅ กด Invalid สำเร็จ");
     } else {
         console.warn("⚠️ ไม่พบปุ่ม Invalid");
@@ -445,15 +548,21 @@ async function runInvalidDataMissingAcceptFlow(reasonText = "invalid flow") {
         return;
     }
 
-    await delay(250);
-    if (forceClickByText(["Data Missing"])) {
-        console.log("✅ กด Data Missing สำเร็จ");
-    } else {
-        console.warn("⚠️ ไม่พบปุ่ม Data Missing");
+    // 2) Wait for the reason menu to appear, then click Data Missing (contains match)
+    await delay(300);
+    // Try to click the menu item (opens checkbox list) then click checkbox itself
+    await clickByContainsTextAndVerify(["data missing", "datamissing"], { tries: 10, intervalMs: 350 });
+    const dmCb = await clickDataMissingCheckboxAndVerify({ tries: 12, intervalMs: 350 });
+    if (!dmCb.ok) {
+        console.warn("⚠️ Data Missing checkbox ไม่ถูกติ๊ก (ค้าง/หาไม่เจอ):", dmCb.reason);
+        setStatus("Invalid flow: ติ๊ก Data Missing ไม่สำเร็จ");
+        return;
     }
+    console.log("✅ ติ๊ก Data Missing สำเร็จ");
 
-    await delay(250);
-    if (forceClickByText(["Fix + Accept", "Accept"])) {
+    // 3) Accept
+    await delay(350);
+    if (forceClickByText(["Fix + Accept", "Accept"]) || (await clickByContainsTextAndVerify(["fix + accept", "accept"], { tries: 10, intervalMs: 350 })).ok) {
         console.log("✅ กด Fix + Accept/Accept สำเร็จ");
         setStatus("Invalid flow: ส่งงานแล้ว");
     } else {
@@ -491,14 +600,17 @@ setInterval(() => {
 
             (async () => {
                 try {
+                    const runToken = ++runTokenCounter;
+                    activeRunToken = runToken;
+
                     await delay(readDelay);
-                    if (!isAutoPilotOn) return;
+                    if (!isRunActive(runToken)) return;
 
                     targetEl.click();
                     console.log("🖱️ 1. กด Classification เรียบร้อย!");
 
                     await delay(1000);
-                    if (!isAutoPilotOn) return;
+                    if (!isRunActive(runToken)) return;
 
                     if (classificationValue === "invalid") {
                         setStatus("Invalid — ข้ามถอดเสียง");
@@ -516,9 +628,11 @@ setInterval(() => {
                         console.log("📝 2. โฟกัสกล่องแล้ว กำลังหาปุ่ม Delete Spaces...");
 
                         await delay(500);
+                        if (!isRunActive(runToken)) return;
                         if (forceClickByText(["Delete Spaces"])) {
                             console.log("🧹 2.5 เจอแล้ว! กดลบ Spaces ให้เรียบร้อย!");
                             await delay(600);
+                            if (!isRunActive(runToken)) return;
                             ta.focus();
                         } else {
                             console.log("⚠️ ไม่พบปุ่ม Delete Spaces...");
@@ -533,6 +647,7 @@ setInterval(() => {
                         }
 
                         const apiResult = await postTranscribe(audioBase64);
+                        if (!isRunActive(runToken)) return;
                         if (!apiResult.ok) {
                             console.error("[DingTag]", apiResult.errorLabel, "—", apiResult.detail);
                             setStatus(apiResult.errorLabel + " — " + (apiResult.detail || "").slice(0, 100));
@@ -559,11 +674,12 @@ setInterval(() => {
                             return;
                         }
                         // Step A: วาง raw transcript ก่อน เพื่อให้มั่นใจว่า "ดูดเสียงมาจริง"
-                        setTextareaValueAndNotify(ta, data.text || "");
+                        safeSetTextarea(runToken, ta, data.text || "", "raw");
                         setStatus("วางข้อความดิบแล้ว (กำลังจัดคำ)...");
 
                         // Step B: สั่ง formal จัดคำ แล้ววางทับ
                         const formalResult = await postFormalize(data.text || "");
+                        if (!isRunActive(runToken)) return;
                         if (!formalResult.ok) {
                             console.warn("[DingTag] formalize failed:", formalResult.errorLabel, formalResult.detail);
                             setStatus("จัดคำไม่สำเร็จ (ใช้ข้อความดิบ)");
@@ -572,7 +688,7 @@ setInterval(() => {
                         } else {
                             const formatted = (formalResult.data || {}).text || "";
                             if (formatted && formatted.trim()) {
-                                setTextareaValueAndNotify(ta, formatted);
+                                safeSetTextarea(runToken, ta, formatted, "formal");
                                 setStatus("จัดคำแล้ว");
                             } else {
                                 setStatus("จัดคำแล้ว (ผลลัพธ์ว่าง)");
@@ -585,7 +701,7 @@ setInterval(() => {
                     }
 
                     await delay(moveDelay);
-                    if (!isAutoPilotOn) return;
+                    if (!isRunActive(runToken)) return;
 
                     console.log("🔍 กำลังหาปุ่ม Accept หรือ Fix + Accept...");
                     if (forceClickByText(["Fix + Accept", "Accept"])) {
@@ -597,7 +713,7 @@ setInterval(() => {
                     }
 
                     await delay(1500);
-                    if (!isAutoPilotOn) return;
+                    if (!isRunActive(runToken)) return;
 
                     console.log("🔍 ตรวจสอบป๊อปอัป Ignore & Submit...");
                     const pop = await clickPopupAndVerify(["Ignore & Submit"], {
@@ -617,6 +733,7 @@ setInterval(() => {
                 } finally {
                     await delay(1500);
                     isProcessing = false;
+                    activeRunToken = 0;
                     activeTimeouts = [];
                     console.log("🔄 จบวงจร เตรียมรับงานต่อไป...");
                     if (isAutoPilotOn) setStatus("กำลังค้นหา target...");

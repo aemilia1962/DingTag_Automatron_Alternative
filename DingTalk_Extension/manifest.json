@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DingTalk Automatron",
-  "version": "1.5",
+  "version": "1.7",
   "description": "Automatically clicks Accept if the classification is Valid. Created by IQ.Automatron",
   "host_permissions": [
     "http://127.0.0.1:54321/*",
