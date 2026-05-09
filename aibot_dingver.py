@@ -10,6 +10,8 @@ import urllib.request
 import urllib.error
 import subprocess
 from typing import Any
+from dataclasses import dataclass, field
+from hashlib import sha256
 
 import uvicorn
 from fastapi import FastAPI
@@ -44,6 +46,96 @@ fastapi_app.add_middleware(
 
 class TranscribeRequest(BaseModel):
     audioBase64: str = Field(..., description="WAV file bytes, standard Base64")
+    asyncMode: bool = Field(False, description="If true, returns a jobId immediately")
+
+
+class FormalizeRequest(BaseModel):
+    text: str = Field(..., description="Plain transcript text")
+
+
+@dataclass
+class TranscribeJob:
+    jobId: str
+    status: str = "queued"  # queued|running|success|error|paused
+    step: str = "queued"
+    message: str = ""
+    startedAt: float = 0.0
+    finishedAt: float = 0.0
+    audioBytes: int = 0
+    audioSha256_12: str = ""
+    isSensitive: bool | None = None
+    textLen: int = 0
+    result: dict | None = None
+    error: str | None = None
+    history: list[dict] = field(default_factory=list)
+
+
+_jobs_lock = threading.Lock()
+_jobs: dict[str, TranscribeJob] = {}
+
+
+def _new_job_id() -> str:
+    # short id: epoch-ms + random
+    return f"job_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+
+
+def _job_snapshot(job: TranscribeJob) -> dict:
+    return {
+        "jobId": job.jobId,
+        "status": job.status,
+        "step": job.step,
+        "message": job.message,
+        "startedAt": job.startedAt,
+        "finishedAt": job.finishedAt,
+        "audioBytes": job.audioBytes,
+        "audioSha256_12": job.audioSha256_12,
+        "textLen": job.textLen,
+        "isSensitive": job.isSensitive,
+        "error": job.error,
+        "history": job.history[-30:],
+        "result": job.result if job.status == "success" else None,
+    }
+
+
+def _job_update(job_id: str, *, status: str | None = None, step: str | None = None, message: str | None = None, **extra):
+    now = time.time()
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        if status is not None:
+            job.status = status
+        if step is not None:
+            job.step = step
+        if message is not None:
+            job.message = message
+        for k, v in extra.items():
+            if hasattr(job, k):
+                setattr(job, k, v)
+        job.history.append(
+            {
+                "ts": now,
+                "status": job.status,
+                "step": job.step,
+                "message": job.message,
+            }
+        )
+
+
+@fastapi_app.get("/api/transcribe/jobs/{job_id}")
+def api_transcribe_job_status(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return JSONResponse(status_code=404, content={"status": "error", "message": "job not found"})
+        return _job_snapshot(job)
+
+
+def _is_probably_wav(raw: bytes) -> bool:
+    # Minimal RIFF/WAVE header check
+    if len(raw) < 12:
+        return False
+    return raw[0:4] == b"RIFF" and raw[8:12] == b"WAVE"
 
 
 @fastapi_app.post("/api/transcribe")
@@ -54,18 +146,43 @@ def api_transcribe(body: TranscribeRequest):
     if inst is None or not inst.is_ai_active:
         print("[API] ตอบกลับ: paused (แอปยังไม่พร้อม หรือปิด AI)")
         return {"status": "paused"}
+
     try:
-        out = inst.run_transcribe_chain(body.audioBase64)
-        print(
-            f"[API] สำเร็จ — isSensitive={out.get('isSensitive')} "
-            f"ความยาวข้อความ={len((out.get('text') or ''))}"
-        )
+        if body.asyncMode:
+            job_id = _new_job_id()
+            job = TranscribeJob(jobId=job_id, status="queued", step="queued", startedAt=time.time())
+            with _jobs_lock:
+                _jobs[job_id] = job
+            _job_update(job_id, status="running", step="received", message="รับคำขอแล้ว")
+            threading.Thread(
+                target=inst.run_transcribe_job,
+                args=(job_id, body.audioBase64),
+                daemon=True,
+            ).start()
+            return {"status": "accepted", "jobId": job_id}
+
+        # Step 1 (for Extension): transcribe + basic clean + moderate only (no formalize yet)
+        out = inst.run_transcribe_then_moderate(body.audioBase64)
+        print(f"[API] สำเร็จ — isSensitive={out.get('isSensitive')} ความยาวข้อความ={len((out.get('text') or ''))}")
         return out
     except ValueError as e:
         print(f"[API] ผิดพลาด 400: {e}")
         return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
     except Exception as e:
         print(f"[API] ผิดพลาด 500: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@fastapi_app.post("/api/formalize")
+def api_formalize(body: FormalizeRequest):
+    inst = _transcriber_instance
+    if inst is None or not inst.is_ai_active:
+        return {"status": "paused"}
+    try:
+        return inst.run_formalize_only(body.text)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
+    except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
@@ -145,6 +262,12 @@ def strip_special_chars(text: str) -> str:
     return text
 
 
+def force_single_line(text: str) -> str:
+    if text is None:
+        return ""
+    return " ".join(str(text).replace("\r", " ").replace("\n", " ").split()).strip()
+
+
 def collapse_overspaced_thai(text: str) -> str:
     if not text:
         return text
@@ -204,6 +327,44 @@ def transcribe_audio_with_retry(
             print(
                 f"[🧩] เปลี่ยนโมเดลชั่วคราวเพื่อแก้ connection error: {model_name} -> {model_candidates[model_idx + 1]}"
             )
+
+    raise last_err if last_err else RuntimeError("Unknown connection failure")
+
+
+def chat_completion_with_retry(
+    oa_client: OpenAI,
+    model_candidates: list[str],
+    messages: list[dict],
+    *,
+    temperature: float,
+    max_tokens: int,
+    timeout: int,
+) -> str:
+    last_err: Exception | None = None
+    for model_idx, model_name in enumerate(model_candidates[:3]):
+        for attempt in range(1, 4):
+            try:
+                if attempt > 1:
+                    print(f"[🔁] Retry {attempt}/3 (model: {model_name})...")
+                return (
+                    oa_client.chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        timeout=timeout,
+                    ).choices[0].message.content
+                    or ""
+                )
+            except Exception as e:
+                last_err = e
+                if not is_transient_connection_error(e):
+                    raise
+                sleep_s = min(8.0, (2 ** (attempt - 1))) + random.random() * 0.4
+                print(f"[⚠️] Connection error: {e} — รอ {sleep_s:.1f}s แล้วลองใหม่")
+                time.sleep(sleep_s)
+        if model_idx < 2:
+            print(f"[🧩] เปลี่ยนโมเดลชั่วคราวเพื่อแก้ connection error: {model_name} -> {model_candidates[model_idx + 1]}")
 
     raise last_err if last_err else RuntimeError("Unknown connection failure")
 
@@ -303,6 +464,9 @@ class AITranscriberApp(AppUI, ctk.CTk):
             raise ValueError("Invalid Base64 audio") from e
         if not raw_bytes:
             raise ValueError("Empty audio payload")
+        if not _is_probably_wav(raw_bytes):
+            # Don't hard-fail (some callers might send non-standard headers), but flag it clearly.
+            print("[API] ⚠️ ไฟล์เสียงอาจไม่ใช่ WAV (RIFF/WAVE header ไม่ตรง)")
 
         b64_clean = base64.b64encode(raw_bytes).decode("ascii")
 
@@ -313,16 +477,18 @@ class AITranscriberApp(AppUI, ctk.CTk):
         raw_content = transcribe_audio_with_retry(
             client, audio_model, b64_clean, prompt_rules
         )
-        result_text = " ".join((raw_content or "").strip().split())
+        result_text = force_single_line(raw_content or "")
         result_text = re.sub(r"[()]", "", result_text)
         result_text = collapse_overspaced_thai(result_text)
+        result_text = force_single_line(result_text)
 
         if not result_text:
             return {"status": "success", "text": "", "isSensitive": False}
 
         max_out = min(8192, max(512, int(len(result_text) * 1.5) + 400))
-        formal_resp = client.chat.completions.create(
-            model=formal_model,
+        formatted_raw = chat_completion_with_retry(
+            client,
+            [formal_model, *[m for m in OPENROUTER_TEXT_MODELS if m != formal_model]],
             messages=[
                 {"role": "system", "content": formal_instruction},
                 {"role": "user", "content": result_text},
@@ -331,11 +497,13 @@ class AITranscriberApp(AppUI, ctk.CTk):
             max_tokens=max_out,
             timeout=90,
         )
-        formatted = (formal_resp.choices[0].message.content or "").strip().replace("-", " ")
+        formatted = force_single_line((formatted_raw or "").strip().replace("-", " "))
         formatted = strip_special_chars(formatted)
+        formatted = force_single_line(formatted)
 
-        mod_resp = client.chat.completions.create(
-            model=MODERATION_MODEL,
+        mod_raw = chat_completion_with_retry(
+            client,
+            [MODERATION_MODEL],
             messages=[
                 {"role": "system", "content": CONTENT_MODERATION_PROMPT},
                 {"role": "user", "content": formatted},
@@ -344,7 +512,6 @@ class AITranscriberApp(AppUI, ctk.CTk):
             max_tokens=16,
             timeout=30,
         )
-        mod_raw = mod_resp.choices[0].message.content or ""
         is_sensitive = parse_moderation_is_sensitive(mod_raw)
 
         return {
@@ -352,6 +519,161 @@ class AITranscriberApp(AppUI, ctk.CTk):
             "text": formatted,
             "isSensitive": is_sensitive,
         }
+
+    def _moderate_text(self, text: str) -> bool:
+        mod_raw = chat_completion_with_retry(
+            client,
+            [MODERATION_MODEL],
+            messages=[
+                {"role": "system", "content": CONTENT_MODERATION_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            temperature=0.0,
+            max_tokens=16,
+            timeout=30,
+        )
+        return parse_moderation_is_sensitive(mod_raw)
+
+    def run_transcribe_then_moderate(self, audio_b64: str) -> dict:
+        """Step 1: ASR + basic cleaning + moderation (NO formalize)."""
+        with self._models_lock:
+            audio_model = self.audio_model
+
+        try:
+            raw_bytes = base64.b64decode(audio_b64, validate=False)
+        except Exception as e:
+            raise ValueError("Invalid Base64 audio") from e
+        if not raw_bytes:
+            raise ValueError("Empty audio payload")
+        if not _is_probably_wav(raw_bytes):
+            print("[API] ⚠️ ไฟล์เสียงอาจไม่ใช่ WAV (RIFF/WAVE header ไม่ตรง)")
+
+        b64_clean = base64.b64encode(raw_bytes).decode("ascii")
+        prompt_rules = DINGTALK_PROMPT + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
+        raw_content = transcribe_audio_with_retry(client, audio_model, b64_clean, prompt_rules)
+
+        result_text = force_single_line(raw_content or "")
+        result_text = re.sub(r"[()]", "", result_text)
+        result_text = collapse_overspaced_thai(result_text)
+        result_text = force_single_line(result_text)
+
+        if not result_text:
+            return {"status": "success", "text": "", "isSensitive": False}
+
+        is_sensitive = self._moderate_text(result_text)
+        return {"status": "success", "text": result_text, "isSensitive": is_sensitive}
+
+    def run_formalize_only(self, text: str) -> dict:
+        """Step 2: formalize only (expects raw already shown to user)."""
+        with self._models_lock:
+            formal_model = self.formal_model
+
+        cleaned = force_single_line(text or "")
+        cleaned = re.sub(r"[()]", "", cleaned)
+        cleaned = collapse_overspaced_thai(cleaned)
+        cleaned = force_single_line(cleaned)
+        if not cleaned:
+            return {"status": "success", "text": ""}
+
+        max_out = min(8192, max(512, int(len(cleaned) * 1.5) + 400))
+        formatted_raw = chat_completion_with_retry(
+            client,
+            [formal_model, *[m for m in OPENROUTER_TEXT_MODELS if m != formal_model]],
+            messages=[
+                {"role": "system", "content": formal_instruction},
+                {"role": "user", "content": cleaned},
+            ],
+            temperature=0.1,
+            max_tokens=max_out,
+            timeout=90,
+        )
+        formatted = force_single_line((formatted_raw or "").strip().replace("-", " "))
+        formatted = strip_special_chars(formatted)
+        formatted = force_single_line(formatted)
+        return {"status": "success", "text": formatted}
+
+    def run_transcribe_job(self, job_id: str, audio_b64: str) -> None:
+        # Step-by-step, with checkpoints written to the job store.
+        try:
+            _job_update(job_id, step="decode", message="กำลังถอด Base64 เป็นเสียง...")
+            raw_bytes = base64.b64decode(audio_b64, validate=False)
+            if not raw_bytes:
+                raise ValueError("Empty audio payload")
+            _job_update(
+                job_id,
+                audioBytes=len(raw_bytes),
+                audioSha256_12=sha256(raw_bytes).hexdigest()[:12],
+                step="validated",
+                message="ตรวจสอบเสียงแล้ว (ได้ข้อมูลจริง)",
+            )
+            if not _is_probably_wav(raw_bytes):
+                _job_update(job_id, step="validated", message="ตรวจสอบเสียงแล้ว (แต่ header WAV ไม่ตรง)")
+
+            with self._models_lock:
+                audio_model = self.audio_model
+                formal_model = self.formal_model
+
+            b64_clean = base64.b64encode(raw_bytes).decode("ascii")
+
+            _job_update(job_id, step="transcribe", message="กำลังถอดเสียงเป็นข้อความ...")
+            prompt_rules = DINGTALK_PROMPT + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
+            raw_content = transcribe_audio_with_retry(client, audio_model, b64_clean, prompt_rules)
+            result_text = force_single_line(raw_content or "")
+            result_text = re.sub(r"[()]", "", result_text)
+            result_text = collapse_overspaced_thai(result_text)
+            result_text = force_single_line(result_text)
+            _job_update(job_id, step="transcribed", message="ถอดเสียงเสร็จแล้ว", textLen=len(result_text))
+
+            if not result_text:
+                out = {"status": "success", "text": "", "isSensitive": False}
+                _job_update(job_id, status="success", step="done", message="เสร็จสิ้น (ไม่มีข้อความ)", finishedAt=time.time(), result=out, isSensitive=False)
+                return
+
+            _job_update(job_id, step="format", message="กำลังจัดข้อความให้เป็นทางการ...")
+            max_out = min(8192, max(512, int(len(result_text) * 1.5) + 400))
+            formatted_raw = chat_completion_with_retry(
+                client,
+                [formal_model, *[m for m in OPENROUTER_TEXT_MODELS if m != formal_model]],
+                messages=[
+                    {"role": "system", "content": formal_instruction},
+                    {"role": "user", "content": result_text},
+                ],
+                temperature=0.1,
+                max_tokens=max_out,
+                timeout=90,
+            )
+            formatted = force_single_line((formatted_raw or "").strip().replace("-", " "))
+            formatted = strip_special_chars(formatted)
+            formatted = force_single_line(formatted)
+            _job_update(job_id, step="formatted", message="จัดข้อความเสร็จแล้ว", textLen=len(formatted))
+
+            _job_update(job_id, step="moderate", message="กำลังตรวจสอบความอ่อนไหวของเนื้อหา...")
+            mod_raw = chat_completion_with_retry(
+                client,
+                [MODERATION_MODEL],
+                messages=[
+                    {"role": "system", "content": CONTENT_MODERATION_PROMPT},
+                    {"role": "user", "content": formatted},
+                ],
+                temperature=0.0,
+                max_tokens=16,
+                timeout=30,
+            )
+            is_sensitive = parse_moderation_is_sensitive(mod_raw)
+            out = {"status": "success", "text": formatted, "isSensitive": is_sensitive}
+            _job_update(
+                job_id,
+                status="success",
+                step="done",
+                message="เสร็จสิ้น",
+                finishedAt=time.time(),
+                result=out,
+                isSensitive=is_sensitive,
+                textLen=len(formatted),
+            )
+        except Exception as e:
+            _job_update(job_id, status="error", step="error", message="เกิดข้อผิดพลาด", finishedAt=time.time(), error=str(e))
+            print(f"[API][JOB] job={job_id} error: {e}")
 
     # ==========================================
     # GitHub Updater

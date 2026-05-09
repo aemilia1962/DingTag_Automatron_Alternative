@@ -1,6 +1,7 @@
 console.log("🚀 DingTalk Auto-Pilot V21 (Local API) Loaded!");
 
 const LOCAL_TRANSCRIBE_URL = "http://127.0.0.1:54321/api/transcribe";
+const LOCAL_FORMALIZE_URL = "http://127.0.0.1:54321/api/formalize";
 
 let isAutoPilotOn = false;
 let isProcessing = false;
@@ -120,6 +121,50 @@ async function postTranscribe(audioBase64) {
     }
 
     console.log("[DingTag] API ตอบกลับ:", data.status, "| isSensitive:", data.isSensitive);
+    return { ok: true, data };
+}
+
+/** สั่ง formal จัดคำจากข้อความที่มีอยู่แล้ว */
+async function postFormalize(text) {
+    const payload = JSON.stringify({ text });
+    const kb = Math.round(payload.length / 1024);
+    console.log("[DingTag] กำลัง POST formalize ไปยัง", LOCAL_FORMALIZE_URL, "| ขนาด body ~" + kb + " KB");
+
+    let res;
+    try {
+        res = await fetch(LOCAL_FORMALIZE_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload,
+        });
+    } catch (e) {
+        return {
+            ok: false,
+            errorLabel: "เชื่อมต่อ Formal API ไม่ได้",
+            detail: (e?.name || "Error") + ": " + (e?.message || String(e)),
+        };
+    }
+
+    const rawText = await res.text();
+    let data;
+    try {
+        data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+        return {
+            ok: false,
+            errorLabel: "Formal API ตอบกลับผิดรูปแบบ",
+            detail: "HTTP " + res.status + " — " + (rawText.slice(0, 120) || "(ว่าง)"),
+        };
+    }
+
+    if (!res.ok) {
+        return {
+            ok: false,
+            data,
+            errorLabel: "Formal API error " + res.status,
+            detail: (data && (data.message || data.detail)) || rawText.slice(0, 200),
+        };
+    }
     return { ok: true, data };
 }
 
@@ -316,6 +361,62 @@ function forceClickByText(keywords) {
     return false;
 }
 
+function findClickableByExactText(keywords) {
+    const clickables = document.querySelectorAll('button, [role="button"], a, div');
+    for (const el of clickables) {
+        const t = (el.innerText || el.textContent || "").trim();
+        if (!t) continue;
+        if (keywords.includes(t)) return el;
+    }
+    return null;
+}
+
+function isKeywordPresentOnPage(keywords) {
+    const els = document.querySelectorAll("*");
+    for (const el of els) {
+        const t = (el.textContent || "").trim();
+        if (t && keywords.includes(t)) return true;
+    }
+    return false;
+}
+
+async function clickPopupAndVerify(keywords, { tries = 6, intervalMs = 450, waitDisappearMs = 1800 } = {}) {
+    // Goal: ensure the popup button is actually clicked and disappears.
+    for (let i = 1; i <= tries; i++) {
+        if (!isAutoPilotOn) return { ok: false, reason: "autopilot_off" };
+
+        const el = findClickableByExactText(keywords);
+        if (!el) {
+            // Not visible => consider it already gone
+            return { ok: true, reason: "not_found" };
+        }
+
+        try {
+            el.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+
+        try {
+            console.log(`[DingTag] Popup click attempt ${i}/${tries}:`, keywords.join("/"));
+            el.click();
+            const parentBtn = el.closest?.('button, [role="button"]');
+            if (parentBtn && parentBtn !== el) parentBtn.click();
+        } catch (e) {
+            console.warn("[DingTag] popup click error:", e?.name, e?.message);
+        }
+
+        // Wait for disappearance
+        const start = Date.now();
+        while (Date.now() - start < waitDisappearMs) {
+            if (!isAutoPilotOn) return { ok: false, reason: "autopilot_off" };
+            if (!isKeywordPresentOnPage(keywords)) return { ok: true, reason: "disappeared" };
+            await delay(Math.min(250, intervalMs));
+        }
+
+        await delay(intervalMs);
+    }
+    return { ok: false, reason: "still_present" };
+}
+
 const delay = (ms) =>
     new Promise((resolve) => {
         const t = setTimeout(resolve, ms);
@@ -457,8 +558,26 @@ setInterval(() => {
                             await runInvalidDataMissingAcceptFlow("Sensitive content");
                             return;
                         }
+                        // Step A: วาง raw transcript ก่อน เพื่อให้มั่นใจว่า "ดูดเสียงมาจริง"
                         setTextareaValueAndNotify(ta, data.text || "");
-                        setStatus("ถอดเสียงแล้ว");
+                        setStatus("วางข้อความดิบแล้ว (กำลังจัดคำ)...");
+
+                        // Step B: สั่ง formal จัดคำ แล้ววางทับ
+                        const formalResult = await postFormalize(data.text || "");
+                        if (!formalResult.ok) {
+                            console.warn("[DingTag] formalize failed:", formalResult.errorLabel, formalResult.detail);
+                            setStatus("จัดคำไม่สำเร็จ (ใช้ข้อความดิบ)");
+                        } else if ((formalResult.data || {}).status === "paused") {
+                            setStatus("Formal: ระบบ AI หยุดชั่วคราว");
+                        } else {
+                            const formatted = (formalResult.data || {}).text || "";
+                            if (formatted && formatted.trim()) {
+                                setTextareaValueAndNotify(ta, formatted);
+                                setStatus("จัดคำแล้ว");
+                            } else {
+                                setStatus("จัดคำแล้ว (ผลลัพธ์ว่าง)");
+                            }
+                        }
                     } else {
                         console.log("⚠️ ไม่พบ Text Area...");
                         setStatus("ไม่พบ Text Area");
@@ -481,8 +600,16 @@ setInterval(() => {
                     if (!isAutoPilotOn) return;
 
                     console.log("🔍 ตรวจสอบป๊อปอัป Ignore & Submit...");
-                    if (forceClickByText(["Ignore & Submit"])) {
-                        console.log("⚠️ 5. เจอป๊อปอัป! กด Ignore ให้แล้ว!");
+                    const pop = await clickPopupAndVerify(["Ignore & Submit"], {
+                        tries: 8,
+                        intervalMs: 500,
+                        waitDisappearMs: 2200,
+                    });
+                    if (pop.ok) {
+                        if (pop.reason !== "not_found") console.log("✅ 5. Popup ถูกกดและหายไปแล้ว");
+                    } else {
+                        console.warn("⚠️ 5. Popup ยังอยู่/ค้าง (ไม่มั่นใจว่ากดติด):", pop.reason);
+                        setStatus("Popup ค้าง: Ignore & Submit");
                     }
                 } catch (e) {
                     console.error("Sequence Error:", e);

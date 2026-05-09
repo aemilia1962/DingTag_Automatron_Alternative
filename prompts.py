@@ -80,18 +80,27 @@ OUTPUT: เรื่องนี้สำคัญมากครับ แล�
 # 3. Formal Text Spacing Instruction
 # ==========================================
 # โหมด formal: สั้นเพื่อลด input tokens ทุกครั้งที่เรียก API (เนื้อหาสำคัญยังครบ)
-formal_instruction = """โหมดจัดรูปอย่างเป็นทางการ
+formal_instruction = """
+Act as a professional Thai Spacing and English Capitalization Editor.
+Your ONLY goals:
+1. Fix the spacing (เว้นวรรค) of the text according to standard Thai readability rules.
+2. If you encounter an English sentence or clause, capitalize the first letter of that sentence/clause.
 
-ทำได้เท่านี้:
-• ไทย: จัดเว้นวรรคให้อ่านง่ายตามมาตรฐานทั่วไป
-• ไม้ยมก ๆ: เขียนติดคำเดิม ห้ามเว้นวรรค (เช่น จริงๆ มากๆ ไม่ใช่ จริง ๆ)
-• อังกฤษ: ขึ้นต้นประโยค/วลีด้วยตัวใหญ่ (sentence case ตามจุดเริ่มประโยคหรือวลี)
+กฎตัวเลขและจำนวน:
+• แปลงจำนวนเป็นเลขอารบิก (0-9) ทั้งหมด
+• NO FRACTIONS: ห้ามแปลงคำว่า "ครึ่ง" หรือ "เสี้ยว" เป็นเศษส่วน 1/2 หรือ 0.5 เด็ดขาด (ตัวอย่าง: "ชั่วโมงครึ่ง" ให้เขียน "1 ชั่วโมงครึ่ง" ห้ามเขียน "1 1/2")
+• ห้ามแปลงคำถามจำนวน เช่น "กี่" เป็นตัวเลข
+• "ปี ค.ศ. หนึ่งเก้าศูนย์เก้า "ต้องเขียนเป็น "ปี ค.ศ. 1990" ห้ามตัด ค.ศ. ออก
 
-ตัวเลข: จำนวน→เลขอารบิก | ห้ามครึ่ง/เสี้ยว→1/2 หรือ 0.5 | ห้ามแปลงคำว่ากี่ | พูดปี ค.ศ. เป็นคำ→เขียน ปี ค.ศ. + เลขปีอารบิก
+DO NOT change, add, or remove any words, spelling, numbers, or punctuation marks beyond these two rules.
 
-ห้ามเพิ่ม/ลบ/แก้คำหรือสะกดหรือวรรคตอน นอกจากข้อบน
+CRITICAL RULES:
+- FIX SPACING ONLY (Thai text)
+- CAPITALIZE FIRST LETTER OF ENGLISH SENTENCES ONLY
+- NEVER REMOVE OR ADD WORDS
+- NEVER ALTER SPELLING OR PUNCTUATION
+"""
 
-ตอบเฉพาะข้อความที่จัดแล้ว ไม่มีคำอธิบาย"""
 
 # ==========================================
 # 4. Content moderation (Politics / War / Monarchy)

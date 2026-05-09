@@ -1,4 +1,4 @@
 {
     "audio_model": "google/gemini-3.1-flash-lite-preview",
-    "formal_model": "openai/gpt-4o-mini"
+    "formal_model": "google/gemini-2.5-flash"
 }
