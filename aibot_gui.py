@@ -76,7 +76,6 @@ class AppUI:
 
         self._build_top_bar()
         self._build_status_bar()
-        self._build_task_tracker_panel()
         self._build_models_panel()
 
     def _build_top_bar(self):
@@ -160,48 +159,49 @@ class AppUI:
         self.toggle_switch.pack(pady=10)
 
     def _build_task_tracker_panel(self):
-        box = ctk.CTkFrame(self.left_frame, corner_radius=10, fg_color=("#2b2b2b", "#1e272e"))
-        box.pack(fill="x", padx=20, pady=(0, 10))
+        """แผงสถิติด้านขวา — ใช้ร่วมกับ right_tracker_wrap (สัดส่วนความสูงจัดที่ grid แม่)"""
+        box = ctk.CTkFrame(self.right_tracker_wrap, corner_radius=10, fg_color=("#2b2b2b", "#1e272e"))
+        box.pack(fill="both", expand=True)
 
         ctk.CTkLabel(
             box,
             text="TIME / TASK TRACKER",
-            font=ctk.CTkFont(size=12, weight="bold"),
+            font=ctk.CTkFont(size=11, weight="bold"),
             text_color="#95a5a6",
-        ).pack(anchor="w", padx=12, pady=(10, 6))
+        ).pack(anchor="w", padx=10, pady=(8, 4))
 
         self.tracker_elapsed_label = ctk.CTkLabel(
             box,
             text="เซสชันนี้: —",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=11),
             anchor="w",
         )
-        self.tracker_elapsed_label.pack(fill="x", padx=12, pady=(0, 2))
+        self.tracker_elapsed_label.pack(fill="x", padx=10, pady=(0, 1))
 
         self.tracker_files_label = ctk.CTkLabel(
             box,
             text="ถอดเสียงสำเร็จ: 0 ไฟล์",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=11),
             anchor="w",
         )
-        self.tracker_files_label.pack(fill="x", padx=12, pady=(0, 2))
+        self.tracker_files_label.pack(fill="x", padx=10, pady=(0, 1))
 
         self.tracker_formal_label = ctk.CTkLabel(
             box,
             text="Formalize สำเร็จ: 0 ครั้ง",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=11),
             anchor="w",
         )
-        self.tracker_formal_label.pack(fill="x", padx=12, pady=(0, 2))
+        self.tracker_formal_label.pack(fill="x", padx=10, pady=(0, 1))
 
         self.tracker_proc_label = ctk.CTkLabel(
             box,
             text="เวลาประมวลผล AI รวม: —",
-            font=ctk.CTkFont(size=11),
+            font=ctk.CTkFont(size=10),
             text_color="#bdc3c7",
             anchor="w",
         )
-        self.tracker_proc_label.pack(fill="x", padx=12, pady=(0, 12))
+        self.tracker_proc_label.pack(fill="x", padx=10, pady=(0, 8))
 
     def _build_models_panel(self):
         from aibot_dingver import LOCAL_API_HOST, LOCAL_API_PORT, OPENROUTER_AUDIO_MODELS, OPENROUTER_TEXT_MODELS
@@ -248,8 +248,21 @@ class AppUI:
         self.right_frame = ctk.CTkFrame(self.main_container)
         self.right_frame.pack(side="right", fill="both", expand=True)
 
-        term_header = ctk.CTkFrame(self.right_frame, fg_color="transparent")
-        term_header.pack(fill="x", padx=15, pady=(15, 5))
+        # แบ่งแนวตั้ง 1 : 3 — Tracker (บน) : Terminal (ล่าง)
+        self.right_frame.grid_rowconfigure(0, weight=1)
+        self.right_frame.grid_rowconfigure(1, weight=3)
+        self.right_frame.grid_columnconfigure(0, weight=1)
+
+        self.right_tracker_wrap = ctk.CTkFrame(self.right_frame, fg_color="transparent")
+        self.right_tracker_wrap.grid(row=0, column=0, sticky="nsew", padx=15, pady=(15, 6))
+
+        self.right_terminal_wrap = ctk.CTkFrame(self.right_frame, fg_color="transparent")
+        self.right_terminal_wrap.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
+
+        self._build_task_tracker_panel()
+
+        term_header = ctk.CTkFrame(self.right_terminal_wrap, fg_color="transparent")
+        term_header.pack(fill="x", pady=(0, 5))
         ctk.CTkLabel(
             term_header,
             text="TERMINAL LOG",
@@ -267,11 +280,11 @@ class AppUI:
         ).pack(side="right")
 
         self.log_console = ctk.CTkTextbox(
-            self.right_frame,
+            self.right_terminal_wrap,
             font=ctk.CTkFont(family="Consolas", size=12),
             fg_color="#1a1a1a",
         )
-        self.log_console.pack(padx=15, pady=(0, 15), fill="both", expand=True)
+        self.log_console.pack(fill="both", expand=True)
         self.log_console.configure(state="disabled")
 
         self.log_console.tag_config("error", foreground="#ff4d4d")
