@@ -7,6 +7,11 @@ let isAutoPilotOn = false;
 let isProcessing = false;
 let readDelay = 1500;
 let moveDelay = 8000;
+/** หน่วงอย่างน้อย (มิลลิวิ) จากจุดเริ่มงานจนถึงก่อนกด Accept — ถ้างานจบเร็วเกินจะรอให้ครบ; ถ้าเกินเวลานี้อยู่แล้วไม่รอเพิ่ม */
+let minElapsedBeforeAcceptMs = Math.max(
+    0,
+    parseInt(localStorage.getItem("dingtag_min_elapsed_before_accept_ms") || "0", 10) || 0
+);
 let sensitiveFilterEnabled = localStorage.getItem("dingtag_sensitive_filter_enabled") !== "0";
 let nonTargetAutoInvalidEnabled = localStorage.getItem("dingtag_non_target_auto_invalid") !== "0";
 let activeTimeouts = [];
@@ -303,6 +308,21 @@ moveSlider.value = moveDelay;
 moveSlider.style.width = "100%";
 settingsContainer.appendChild(moveSlider);
 
+const minAcceptLabel = document.createElement("div");
+minAcceptLabel.style.fontSize = "12px";
+minAcceptLabel.style.marginTop = "10px";
+settingsContainer.appendChild(minAcceptLabel);
+const minAcceptSlider = document.createElement("input");
+minAcceptSlider.type = "range";
+minAcceptSlider.min = "0";
+minAcceptSlider.max = "180000";
+minAcceptSlider.step = "1000";
+minAcceptSlider.value = String(minElapsedBeforeAcceptMs);
+minAcceptSlider.style.width = "100%";
+minAcceptSlider.title =
+    "จากเริ่มงานแต่ละรอบถึงก่อนกด Accept ใช้เวลาอย่างน้อยเท่านี้ (ถ้างานเร็วเกินจะรอให้ครบ)";
+settingsContainer.appendChild(minAcceptSlider);
+
 const sensitiveRow = document.createElement("div");
 sensitiveRow.style.display = "flex";
 sensitiveRow.style.alignItems = "center";
@@ -379,6 +399,10 @@ document.body.appendChild(panel);
 function updateLabels() {
     readLabel.innerText = `⏱️ รอก่อนคลิกแรก: ${(readDelay / 1000).toFixed(1)} วิ`;
     moveLabel.innerText = `🖱️ ระยะห่างสองคลิก: ${(moveDelay / 1000).toFixed(1)} วิ`;
+    minAcceptLabel.innerText =
+        minElapsedBeforeAcceptMs <= 0
+            ? `🛡️ ก่อนกด Accept อย่างน้อย: ปิด (ไม่บังคับ)`
+            : `🛡️ ก่อนกด Accept อย่างน้อย: ${(minElapsedBeforeAcceptMs / 1000).toFixed(0)} วิ (งานเร็วเกินจะรอให้ครบ)`;
 }
 updateLabels();
 
@@ -410,6 +434,11 @@ readSlider.addEventListener("input", (e) => {
 });
 moveSlider.addEventListener("input", (e) => {
     moveDelay = parseInt(e.target.value);
+    updateLabels();
+});
+minAcceptSlider.addEventListener("input", (e) => {
+    minElapsedBeforeAcceptMs = Math.max(0, parseInt(e.target.value, 10) || 0);
+    localStorage.setItem("dingtag_min_elapsed_before_accept_ms", String(minElapsedBeforeAcceptMs));
     updateLabels();
 });
 
@@ -575,6 +604,21 @@ const delay = (ms) =>
         activeTimeouts.push(t);
     });
 
+/** รอให้ครบ minElapsedBeforeAcceptMs นับจาก cycleStartAt ก่อนกด Accept (งานนานอยู่แล้วจะไม่รอเพิ่ม) */
+async function ensureMinElapsedBeforeAccept(runToken, cycleStartAt) {
+    const minMs = minElapsedBeforeAcceptMs;
+    if (!minMs || minMs <= 0) return;
+
+    let remaining = minMs - (Date.now() - cycleStartAt);
+    while (remaining > 0) {
+        if (!isRunActive(runToken)) return;
+        setStatus(`รอเวลาขั้นต่ำก่อน Accept อีก ~${(remaining / 1000).toFixed(1)} วิ`);
+        const chunk = Math.min(remaining, 400);
+        await delay(chunk);
+        remaining = minMs - (Date.now() - cycleStartAt);
+    }
+}
+
 async function waitForSelector(selector, { timeoutMs = 8000, intervalMs = 200 } = {}) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -588,7 +632,7 @@ async function waitForSelector(selector, { timeoutMs = 8000, intervalMs = 200 } 
 
 async function runInvalidReasonAcceptFlow(
     reasonText = "invalid flow",
-    { checkboxName, menuNeedles, logLabel = "reason" }
+    { checkboxName, menuNeedles, logLabel = "reason", runToken, cycleStartAt }
 ) {
     console.log(`🚩 ${reasonText}: Invalid -> ${logLabel} -> Accept/Fix + Accept`);
 
@@ -617,6 +661,10 @@ async function runInvalidReasonAcceptFlow(
     console.log(`✅ ติ๊ก ${logLabel} สำเร็จ`);
 
     await delay(350);
+    if (runToken != null && cycleStartAt != null) {
+        await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
+        if (!isRunActive(runToken)) return;
+    }
     if (forceClickByText(["Fix + Accept", "Accept"]) || (await clickByContainsTextAndVerify(["fix + accept", "accept"], { tries: 10, intervalMs: 350 })).ok) {
         console.log("✅ กด Fix + Accept/Accept สำเร็จ");
         setStatus("Invalid flow: ส่งงานแล้ว");
@@ -626,19 +674,23 @@ async function runInvalidReasonAcceptFlow(
     }
 }
 
-async function runInvalidDataMissingAcceptFlow(reasonText = "invalid flow") {
+async function runInvalidDataMissingAcceptFlow(reasonText = "invalid flow", runToken, cycleStartAt) {
     return runInvalidReasonAcceptFlow(reasonText, {
         checkboxName: "Data Missing",
         menuNeedles: ["data missing", "datamissing"],
         logLabel: "Data Missing",
+        runToken,
+        cycleStartAt,
     });
 }
 
-async function runInvalidNonTargetLanguageAcceptFlow(reasonText = "non-target language") {
+async function runInvalidNonTargetLanguageAcceptFlow(reasonText = "non-target language", runToken, cycleStartAt) {
     return runInvalidReasonAcceptFlow(reasonText, {
         checkboxName: "Non-Target Language",
         menuNeedles: ["non-target", "non target language", "nontarget language", "non target", "nontarget"],
         logLabel: "Non-Target Language",
+        runToken,
+        cycleStartAt,
     });
 }
 
@@ -673,6 +725,7 @@ setInterval(() => {
                 try {
                     const runToken = ++runTokenCounter;
                     activeRunToken = runToken;
+                    const cycleStartAt = Date.now();
 
                     await delay(readDelay);
                     if (!isRunActive(runToken)) return;
@@ -686,7 +739,7 @@ setInterval(() => {
                     if (classificationValue === "invalid") {
                         setStatus("Invalid — ข้ามถอดเสียง");
                         console.log("⚡ Classification = Invalid -> ข้ามถอดเสียง");
-                        await runInvalidDataMissingAcceptFlow("Classification invalid");
+                        await runInvalidDataMissingAcceptFlow("Classification invalid", runToken, cycleStartAt);
                         return;
                     }
 
@@ -741,7 +794,7 @@ setInterval(() => {
                         if (sensitiveFilterEnabled && data.isSensitive === true) {
                             console.warn("⚠️ เนื้อหาอ่อนไหว (Politics/War/Monarchy) — ข้ามการวางข้อความ และคงค่าเดิมไว้");
                             setStatus("Sensitive — ส่ง invalid flow");
-                            await runInvalidDataMissingAcceptFlow("Sensitive content");
+                            await runInvalidDataMissingAcceptFlow("Sensitive content", runToken, cycleStartAt);
                             return;
                         }
 
@@ -755,7 +808,7 @@ setInterval(() => {
                                 "— ข้ามการวางข้อความ และคงค่าเดิมไว้"
                             );
                             setStatus("Non-Target — ส่ง invalid flow");
-                            await runInvalidNonTargetLanguageAcceptFlow("Non-target language (QC)");
+                            await runInvalidNonTargetLanguageAcceptFlow("Non-target language (QC)", runToken, cycleStartAt);
                             return;
                         }
                         // Step A: วาง raw transcript ก่อน เพื่อให้มั่นใจว่า "ดูดเสียงมาจริง"
@@ -786,6 +839,9 @@ setInterval(() => {
                     }
 
                     await delay(moveDelay);
+                    if (!isRunActive(runToken)) return;
+
+                    await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
                     if (!isRunActive(runToken)) return;
 
                     console.log("🔍 กำลังหาปุ่ม Accept หรือ Fix + Accept...");
