@@ -52,7 +52,7 @@ class AppUI:
         import os
 
         self.title("AI Transcriber Pro")
-        self.geometry("900x550")
+        self.geometry("900x620")
         self.resizable(False, False)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -76,6 +76,7 @@ class AppUI:
 
         self._build_top_bar()
         self._build_status_bar()
+        self._build_task_tracker_panel()
         self._build_models_panel()
 
     def _build_top_bar(self):
@@ -157,6 +158,50 @@ class AppUI:
             font=ctk.CTkFont(size=13),
         )
         self.toggle_switch.pack(pady=10)
+
+    def _build_task_tracker_panel(self):
+        box = ctk.CTkFrame(self.left_frame, corner_radius=10, fg_color=("#2b2b2b", "#1e272e"))
+        box.pack(fill="x", padx=20, pady=(0, 10))
+
+        ctk.CTkLabel(
+            box,
+            text="TIME / TASK TRACKER",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#95a5a6",
+        ).pack(anchor="w", padx=12, pady=(10, 6))
+
+        self.tracker_elapsed_label = ctk.CTkLabel(
+            box,
+            text="เซสชันนี้: —",
+            font=ctk.CTkFont(size=12),
+            anchor="w",
+        )
+        self.tracker_elapsed_label.pack(fill="x", padx=12, pady=(0, 2))
+
+        self.tracker_files_label = ctk.CTkLabel(
+            box,
+            text="ถอดเสียงสำเร็จ: 0 ไฟล์",
+            font=ctk.CTkFont(size=12),
+            anchor="w",
+        )
+        self.tracker_files_label.pack(fill="x", padx=12, pady=(0, 2))
+
+        self.tracker_formal_label = ctk.CTkLabel(
+            box,
+            text="Formalize สำเร็จ: 0 ครั้ง",
+            font=ctk.CTkFont(size=12),
+            anchor="w",
+        )
+        self.tracker_formal_label.pack(fill="x", padx=12, pady=(0, 2))
+
+        self.tracker_proc_label = ctk.CTkLabel(
+            box,
+            text="เวลาประมวลผล AI รวม: —",
+            font=ctk.CTkFont(size=11),
+            text_color="#bdc3c7",
+            anchor="w",
+        )
+        self.tracker_proc_label.pack(fill="x", padx=12, pady=(0, 12))
 
     def _build_models_panel(self):
         from aibot_dingver import LOCAL_API_HOST, LOCAL_API_PORT, OPENROUTER_AUDIO_MODELS, OPENROUTER_TEXT_MODELS
@@ -262,11 +307,11 @@ class AppUI:
     def toggle_terminal(self):
         if self.terminal_visible:
             self.right_frame.pack_forget()
-            self.geometry("420x550")
+            self.geometry("420x620")
             self.fold_btn.configure(text="▶ กาง")
         else:
             self.right_frame.pack(side="right", fill="both", expand=True)
-            self.geometry("900x550")
+            self.geometry("900x620")
             self.fold_btn.configure(text="◀ พับ")
         self.terminal_visible = not self.terminal_visible
 

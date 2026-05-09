@@ -74,6 +74,45 @@ class TranscribeJob:
 _jobs_lock = threading.Lock()
 _jobs: dict[str, TranscribeJob] = {}
 
+# Session task / time tracker (GUI + GET /api/stats)
+_stats_lock = threading.Lock()
+_session_started_at: float = 0.0
+_stats_transcribe_ok: int = 0
+_stats_formalize_ok: int = 0
+_stats_processing_seconds: float = 0.0
+
+
+def _session_stats_record_transcribe(duration_s: float) -> None:
+    global _stats_transcribe_ok, _stats_processing_seconds
+    with _stats_lock:
+        _stats_transcribe_ok += 1
+        _stats_processing_seconds += max(0.0, duration_s)
+
+
+def _session_stats_record_formalize(duration_s: float) -> None:
+    global _stats_formalize_ok, _stats_processing_seconds
+    with _stats_lock:
+        _stats_formalize_ok += 1
+        _stats_processing_seconds += max(0.0, duration_s)
+
+
+def get_session_stats() -> dict[str, Any]:
+    """Snapshot for UI and GET /api/stats."""
+    now = time.time()
+    with _stats_lock:
+        started = _session_started_at
+        t_ok = _stats_transcribe_ok
+        f_ok = _stats_formalize_ok
+        proc = _stats_processing_seconds
+    elapsed = max(0.0, now - started) if started > 0 else 0.0
+    return {
+        "sessionStartedAt": started,
+        "sessionElapsedSeconds": elapsed,
+        "transcribeCompleted": t_ok,
+        "formalizeCompleted": f_ok,
+        "processingSeconds": proc,
+    }
+
 
 def _new_job_id() -> str:
     # short id: epoch-ms + random
@@ -177,6 +216,12 @@ def api_transcribe(body: TranscribeRequest):
     except Exception as e:
         print(f"[API] ผิดพลาด 500: {e}")
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@fastapi_app.get("/api/stats")
+def api_stats():
+    """สถิติเซสชันปัจจุบัน: เวลาเปิดแอป, จำนวนไฟล์ถอดเสียงสำเร็จ, ครั้งที่ formalize สำเร็จ, เวลารวมในโมเดล."""
+    return get_session_stats()
 
 
 @fastapi_app.post("/api/formalize")
@@ -445,10 +490,16 @@ class AITranscriberApp(AppUI, ctk.CTk):
         self.setup_window(resource_path)
         self.setup_ui()
 
+        global _session_started_at
+        with _stats_lock:
+            _session_started_at = time.time()
+
         _transcriber_instance = self
         threading.Thread(target=self._run_uvicorn, daemon=True).start()
         print(f"🌐 Local API: http://{LOCAL_API_HOST}:{LOCAL_API_PORT}/api/transcribe")
         print("🚀 ระบบพร้อมทำงานแล้ว!")
+
+        self.after(1000, self._tick_task_tracker)
 
         self._cleanup_old_exe()
         threading.Thread(target=self._startup_update_check, daemon=True).start()
@@ -629,6 +680,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
 
     def run_transcribe_then_moderate(self, audio_b64: str) -> dict:
         """Step 1: ASR + basic cleaning + moderation (NO formalize)."""
+        t0 = time.time()
         with self._models_lock:
             audio_model = self.audio_model
 
@@ -651,6 +703,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         result_text = force_single_line(result_text)
 
         if not result_text:
+            _session_stats_record_transcribe(time.time() - t0)
             return {
                 "status": "success",
                 "text": "",
@@ -665,10 +718,12 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 f"[API] QC Non-Target: englishRatio={qc.get('englishRatio')} "
                 f"source={qc.get('nonTargetSource')}"
             )
+        _session_stats_record_transcribe(time.time() - t0)
         return {"status": "success", "text": result_text, "isSensitive": is_sensitive, "qc": qc}
 
     def run_formalize_only(self, text: str) -> dict:
         """Step 2: formalize only (expects raw already shown to user)."""
+        t0 = time.time()
         with self._models_lock:
             formal_model = self.formal_model
 
@@ -677,6 +732,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         cleaned = collapse_overspaced_thai(cleaned)
         cleaned = force_single_line(cleaned)
         if not cleaned:
+            _session_stats_record_formalize(time.time() - t0)
             return {"status": "success", "text": ""}
 
         max_out = min(8192, max(512, int(len(cleaned) * 1.5) + 400))
@@ -694,10 +750,12 @@ class AITranscriberApp(AppUI, ctk.CTk):
         formatted = force_single_line((formatted_raw or "").strip().replace("-", " "))
         formatted = strip_special_chars(formatted)
         formatted = force_single_line(formatted)
+        _session_stats_record_formalize(time.time() - t0)
         return {"status": "success", "text": formatted}
 
     def run_transcribe_job(self, job_id: str, audio_b64: str) -> None:
         # Step-by-step, with checkpoints written to the job store.
+        t0 = time.time()
         try:
             _job_update(job_id, step="decode", message="กำลังถอด Base64 เป็นเสียง...")
             raw_bytes = base64.b64decode(audio_b64, validate=False)
@@ -736,6 +794,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
                     "qc": {"isNonTarget": False, "englishRatio": 0.0, "nonTargetSource": "none"},
                 }
                 _job_update(job_id, status="success", step="done", message="เสร็จสิ้น (ไม่มีข้อความ)", finishedAt=time.time(), result=out, isSensitive=False)
+                _session_stats_record_transcribe(time.time() - t0)
                 return
 
             qc = self._classify_non_target_qc(result_text)
@@ -782,9 +841,38 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 isSensitive=is_sensitive,
                 textLen=len(formatted),
             )
+            _session_stats_record_transcribe(time.time() - t0)
         except Exception as e:
             _job_update(job_id, status="error", step="error", message="เกิดข้อผิดพลาด", finishedAt=time.time(), error=str(e))
             print(f"[API][JOB] job={job_id} error: {e}")
+
+    def _format_duration_hms_thai(self, seconds: float) -> str:
+        sec = max(0, int(seconds))
+        h, rem = divmod(sec, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h} ชม. {m} นาที"
+        if m > 0:
+            return f"{m} นาที {s} วินาที"
+        return f"{s} วินาที"
+
+    def _tick_task_tracker(self):
+        try:
+            st = get_session_stats()
+            elapsed = float(st.get("sessionElapsedSeconds") or 0)
+            proc = float(st.get("processingSeconds") or 0)
+            n_files = int(st.get("transcribeCompleted") or 0)
+            n_formal = int(st.get("formalizeCompleted") or 0)
+            self.tracker_elapsed_label.configure(text=f"เซสชันนี้: {self._format_duration_hms_thai(elapsed)}")
+            self.tracker_files_label.configure(text=f"ถอดเสียงสำเร็จ: {n_files} ไฟล์")
+            self.tracker_formal_label.configure(text=f"Formalize สำเร็จ: {n_formal} ครั้ง")
+            self.tracker_proc_label.configure(text=f"เวลาประมวลผล AI รวม: {self._format_duration_hms_thai(proc)}")
+        except Exception:
+            pass
+        try:
+            self.after(1000, self._tick_task_tracker)
+        except Exception:
+            pass
 
     # ==========================================
     # GitHub Updater
@@ -1066,5 +1154,8 @@ class AITranscriberApp(AppUI, ctk.CTk):
 
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     app = AITranscriberApp()
     app.mainloop()
