@@ -1,6 +1,6 @@
 {
     "audio_model": "google/gemini-3.1-flash-lite-preview",
-    "formal_model": "google/gemini-2.5-flash",
+    "formal_model": "openai/gpt-4o-mini",
     "qc": {
         "non_target_english_ratio": 0.6,
         "non_target_gray_low": 0.18

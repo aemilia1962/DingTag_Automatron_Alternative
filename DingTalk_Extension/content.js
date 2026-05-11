@@ -18,13 +18,22 @@ let activeTimeouts = [];
 let lastNoTargetLogAt = 0;
 let runTokenCounter = 0;
 let activeRunToken = 0;
+let lastProcessedTaskId = "";
+let lastSeenUrl = location.href;
 
 function clearAllTasks() {
     activeTimeouts.forEach(t => clearTimeout(t));
     activeTimeouts = [];
     isProcessing = false;
     activeRunToken = 0;
+    resetTaskGate("manual_stop");
     console.log("🛑 Kill Switch: ยกเลิกการกระทำทั้งหมด!");
+}
+
+function resetTaskGate(reason = "unknown") {
+    if (!lastProcessedTaskId) return;
+    console.log(`[DingTag] reset task gate (${reason}) | cleared task: ${lastProcessedTaskId}`);
+    lastProcessedTaskId = "";
 }
 
 function setTextareaValueAndNotify(ta, value) {
@@ -634,7 +643,7 @@ async function runInvalidReasonAcceptFlow(
     reasonText = "invalid flow",
     { checkboxName, menuNeedles, logLabel = "reason", runToken, cycleStartAt }
 ) {
-    console.log(`🚩 ${reasonText}: Invalid -> ${logLabel} -> Accept/Fix + Accept`);
+    console.log(`🚩 ${reasonText}: Invalid -> ${logLabel} -> Classification -> Update`);
 
     if (forceClickByText(["Invalid"]) || (await clickByContainsTextAndVerify(["invalid"])).ok) {
         console.log("✅ กด Invalid สำเร็จ");
@@ -665,12 +674,21 @@ async function runInvalidReasonAcceptFlow(
         await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
         if (!isRunActive(runToken)) return;
     }
-    if (forceClickByText(["Fix + Accept", "Accept"]) || (await clickByContainsTextAndVerify(["fix + accept", "accept"], { tries: 10, intervalMs: 350 })).ok) {
-        console.log("✅ กด Fix + Accept/Accept สำเร็จ");
+    const classRefocusInvalid =
+        forceClickByText(["Classification"]) ||
+        (await clickByContainsTextAndVerify(["classification"], { tries: 8, intervalMs: 300 })).ok;
+    if (classRefocusInvalid) {
+        console.log("🖱️ กด Classification ซ้ำก่อน Update (invalid flow) แล้ว");
+    } else {
+        console.warn("⚠️ ไม่พบ Classification ตอนเตรียมกด Update (invalid flow)");
+    }
+
+    if (forceClickByText(["Update"]) || (await clickByContainsTextAndVerify(["update"], { tries: 10, intervalMs: 350 })).ok) {
+        console.log("✅ กด Update สำเร็จ");
         setStatus("Invalid flow: ส่งงานแล้ว");
     } else {
-        console.warn("⚠️ ไม่พบปุ่ม Accept/Fix + Accept");
-        setStatus("Invalid flow: ไม่พบปุ่ม Accept");
+        console.warn("⚠️ ไม่พบปุ่ม Update");
+        setStatus("Invalid flow: ไม่พบปุ่ม Update");
     }
 }
 
@@ -694,8 +712,20 @@ async function runInvalidNonTargetLanguageAcceptFlow(reasonText = "non-target la
     });
 }
 
+function getCurrentTaskId() {
+    const el = document.querySelector(".lsf-current-task__task-id");
+    if (!el) return "";
+    return (el.textContent || "").trim();
+}
+
 setInterval(() => {
     if (!isAutoPilotOn || isProcessing) return;
+    if (location.href !== lastSeenUrl) {
+        const oldUrl = lastSeenUrl;
+        lastSeenUrl = location.href;
+        resetTaskGate("url_changed");
+        console.log("[DingTag] URL changed:", oldUrl, "->", lastSeenUrl);
+    }
 
     try {
         let targetEl = null;
@@ -717,9 +747,31 @@ setInterval(() => {
             }
         }
 
+        const currentTaskId = getCurrentTaskId();
         if (targetEl) {
+            if (!currentTaskId) {
+                const now = Date.now();
+                if (now - lastNoTargetLogAt > 5000) {
+                    lastNoTargetLogAt = now;
+                    console.log("⏳ เจอ Classification แล้ว แต่ยังอ่าน Task ID ไม่ได้");
+                    setStatus("เจอ Classification แล้ว แต่ยังอ่าน Task ID ไม่ได้");
+                }
+                return;
+            }
+
+            if (currentTaskId === lastProcessedTaskId) {
+                const now = Date.now();
+                if (now - lastNoTargetLogAt > 5000) {
+                    lastNoTargetLogAt = now;
+                    console.log(`⏳ ข้าม task เดิม: ${currentTaskId} (รอ task ใหม่)`);
+                    setStatus(`รอ task ใหม่ (ล่าสุด: ${currentTaskId})`);
+                }
+                return;
+            }
+
             isProcessing = true;
-            setStatus("พบ target แล้ว กำลังทำงาน...");
+            lastProcessedTaskId = currentTaskId;
+            setStatus(`พบ target task ${currentTaskId} แล้ว กำลังทำงาน...`);
 
             (async () => {
                 try {
@@ -844,12 +896,21 @@ setInterval(() => {
                     await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
                     if (!isRunActive(runToken)) return;
 
-                    console.log("🔍 กำลังหาปุ่ม Accept หรือ Fix + Accept...");
-                    if (forceClickByText(["Fix + Accept", "Accept"])) {
-                        console.log("✅ 4. กดปุ่มยืนยันงาน (Accept/Fix) สำเร็จ!");
+                    const classRefocusMain =
+                        forceClickByText(["Classification"]) ||
+                        (await clickByContainsTextAndVerify(["classification"], { tries: 8, intervalMs: 300 })).ok;
+                    if (classRefocusMain) {
+                        console.log("🖱️ ก่อนส่งงาน: กด Classification ซ้ำแล้ว");
                     } else {
-                        console.log("❌ 4. หาปุ่ม Accept ไม่เจอครับ");
-                        setStatus("หาปุ่ม Accept ไม่เจอ");
+                        console.warn("⚠️ ก่อนส่งงาน: ไม่พบ Classification ให้กดซ้ำ");
+                    }
+
+                    console.log("🔍 กำลังหาปุ่ม Update...");
+                    if (forceClickByText(["Update"]) || (await clickByContainsTextAndVerify(["update"], { tries: 10, intervalMs: 350 })).ok) {
+                        console.log("✅ 4. กดปุ่ม Update สำเร็จ!");
+                    } else {
+                        console.log("❌ 4. หาปุ่ม Update ไม่เจอครับ");
+                        setStatus("หาปุ่ม Update ไม่เจอ");
                         return;
                     }
 
@@ -876,8 +937,8 @@ setInterval(() => {
                     isProcessing = false;
                     activeRunToken = 0;
                     activeTimeouts = [];
-                    console.log("🔄 จบวงจร เตรียมรับงานต่อไป...");
-                    if (isAutoPilotOn) setStatus("กำลังค้นหา target...");
+                    console.log("🔄 จบวงจร เตรียมรอ task ใหม่...");
+                    if (isAutoPilotOn) setStatus("กำลังรอ task ใหม่...");
                 }
             })();
         } else {
