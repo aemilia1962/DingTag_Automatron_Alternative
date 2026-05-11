@@ -269,19 +269,13 @@ client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key.strip()
 
 OPENROUTER_AUDIO_MODELS = [
     "google/gemini-3.1-flash-lite-preview",
-    "google/gemini-2.5-flash-lite",
-    "google/gemini-2.5-flash",
-    "openai/gpt-4o-mini",
 ]
-DEFAULT_AUDIO_MODEL = "google/gemini-2.5-flash-lite"
+DEFAULT_AUDIO_MODEL = "google/gemini-3.1-flash-lite-preview"
 
 OPENROUTER_TEXT_MODELS = [
-    "google/gemini-3.1-flash-lite-preview",
-    "google/gemini-2.5-flash-lite",
-    "google/gemini-2.5-flash",
     "openai/gpt-4o-mini",
 ]
-DEFAULT_FORMAL_MODEL = "google/gemini-2.5-flash-lite"
+DEFAULT_FORMAL_MODEL = "openai/gpt-4o-mini"
 
 MODERATION_MODEL = "openai/gpt-4o-mini"
 
@@ -337,12 +331,7 @@ def transcribe_audio_with_retry(
     audio_b64: str,
     prompt: str,
 ) -> str:
-    model_candidates: list[str] = []
-    if primary_audio_model:
-        model_candidates.append(primary_audio_model)
-    for m in OPENROUTER_AUDIO_MODELS:
-        if m not in model_candidates:
-            model_candidates.append(m)
+    model_candidates = [primary_audio_model or DEFAULT_AUDIO_MODEL]
 
     last_err: Exception | None = None
     for model_idx, model_name in enumerate(model_candidates[:3]):
@@ -483,10 +472,8 @@ class AITranscriberApp(AppUI, ctk.CTk):
         self.qc_config: dict[str, float] = _qc_defaults()
 
         self.load_config()
-        if self.audio_model not in OPENROUTER_AUDIO_MODELS:
-            self.audio_model = DEFAULT_AUDIO_MODEL
-        if self.formal_model not in OPENROUTER_TEXT_MODELS:
-            self.formal_model = DEFAULT_FORMAL_MODEL
+        self.audio_model = DEFAULT_AUDIO_MODEL
+        self.formal_model = DEFAULT_FORMAL_MODEL
         self.setup_window(resource_path)
         self.setup_ui()
 
@@ -527,12 +514,6 @@ class AITranscriberApp(AppUI, ctk.CTk):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            am = saved.get("audio_model")
-            if isinstance(am, str) and am.strip() and am.strip() in OPENROUTER_AUDIO_MODELS:
-                self.audio_model = am.strip()
-            fm = saved.get("formal_model")
-            if isinstance(fm, str) and fm.strip() and fm.strip() in OPENROUTER_TEXT_MODELS:
-                self.formal_model = fm.strip()
             qc = saved.get("qc")
             if isinstance(qc, dict):
                 base = _qc_defaults()
@@ -549,8 +530,6 @@ class AITranscriberApp(AppUI, ctk.CTk):
     def save_config(self):
         try:
             data = {
-                "audio_model": self.audio_model,
-                "formal_model": self.formal_model,
                 "qc": {k: float(self.qc_config.get(k, v)) for k, v in _qc_defaults().items()},
             }
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -600,7 +579,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         max_out = min(8192, max(512, int(len(result_text) * 1.5) + 400))
         formatted_raw = chat_completion_with_retry(
             client,
-            [formal_model, *[m for m in OPENROUTER_TEXT_MODELS if m != formal_model]],
+            [formal_model],
             messages=[
                 {"role": "system", "content": formal_instruction},
                 {"role": "user", "content": result_text},
@@ -738,7 +717,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         max_out = min(8192, max(512, int(len(cleaned) * 1.5) + 400))
         formatted_raw = chat_completion_with_retry(
             client,
-            [formal_model, *[m for m in OPENROUTER_TEXT_MODELS if m != formal_model]],
+            [formal_model],
             messages=[
                 {"role": "system", "content": formal_instruction},
                 {"role": "user", "content": cleaned},
@@ -803,7 +782,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
             max_out = min(8192, max(512, int(len(result_text) * 1.5) + 400))
             formatted_raw = chat_completion_with_retry(
                 client,
-                [formal_model, *[m for m in OPENROUTER_TEXT_MODELS if m != formal_model]],
+                [formal_model],
                 messages=[
                     {"role": "system", "content": formal_instruction},
                     {"role": "user", "content": result_text},
@@ -1123,20 +1102,6 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 time.sleep(2)
 
         threading.Thread(target=delete_loop, daemon=True).start()
-
-    def _on_audio_model_change(self, value):
-        if value in OPENROUTER_AUDIO_MODELS:
-            with self._models_lock:
-                self.audio_model = value
-            self.save_config()
-            print(f"🎯 เปลี่ยนโมเดลถอดเสียงเป็น: {value}")
-
-    def _on_formal_model_change(self, value):
-        if value in OPENROUTER_TEXT_MODELS:
-            with self._models_lock:
-                self.formal_model = value
-            self.save_config()
-            print(f"🎯 เปลี่ยนโมเดล Formal เป็น: {value}")
 
     def quit_app(self):
         print("🔴 กำลังปิดโปรแกรม...")

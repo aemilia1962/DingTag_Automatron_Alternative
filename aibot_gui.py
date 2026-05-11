@@ -216,7 +216,7 @@ class AppUI:
         self.tracker_proc_label.pack(fill="x", padx=10, pady=(0, 8))
 
     def _build_models_panel(self):
-        from aibot_dingver import LOCAL_API_HOST, LOCAL_API_PORT, OPENROUTER_AUDIO_MODELS, OPENROUTER_TEXT_MODELS
+        from aibot_dingver import LOCAL_API_HOST, LOCAL_API_PORT
 
         frame = ctk.CTkFrame(self.left_frame, fg_color="transparent")
         frame.pack(fill="x", padx=20, pady=(5, 10))
@@ -234,27 +234,19 @@ class AppUI:
             text_color="#1abc9c",
         ).pack(anchor="w", pady=(0, 12))
 
-        ctk.CTkLabel(frame, text="โมเดลถอดเสียง (OpenRouter):", font=ctk.CTkFont(size=12)).pack(anchor="w")
-        self.audio_model_dropdown = ctk.CTkComboBox(
+        ctk.CTkLabel(
             frame,
-            values=OPENROUTER_AUDIO_MODELS,
-            state="readonly",
-            command=self._on_audio_model_change,
-            width=320,
-        )
-        self.audio_model_dropdown.set(self.audio_model)
-        self.audio_model_dropdown.pack(fill="x", pady=(4, 14))
+            text=f"โมเดลถอดเสียง: {self.audio_model}",
+            font=ctk.CTkFont(size=12),
+            text_color="#ecf0f1",
+        ).pack(anchor="w", pady=(0, 6))
 
-        ctk.CTkLabel(frame, text="โมเดล Formal (หลังถอดเสียง):", font=ctk.CTkFont(size=12)).pack(anchor="w")
-        self.formal_model_dropdown = ctk.CTkComboBox(
+        ctk.CTkLabel(
             frame,
-            values=OPENROUTER_TEXT_MODELS,
-            state="readonly",
-            command=self._on_formal_model_change,
-            width=320,
-        )
-        self.formal_model_dropdown.set(self.formal_model)
-        self.formal_model_dropdown.pack(fill="x", pady=(4, 0))
+            text=f"โมเดลจัดข้อความ: {self.formal_model}",
+            font=ctk.CTkFont(size=12),
+            text_color="#ecf0f1",
+        ).pack(anchor="w", pady=(0, 0))
 
     def _build_right_panel(self):
         self.right_frame = ctk.CTkFrame(self.main_container)

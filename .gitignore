@@ -1,7 +1,7 @@
-dist/
-build/
-*.spec.bak
-__pycache__/
-*.pyc
-build_windows_exe.bat
-dingtag.spec
+# dist/
+# build/
+# *.spec.bak
+# __pycache__/
+# *.pyc
+# build_windows_exe.bat
+# dingtag.spec
