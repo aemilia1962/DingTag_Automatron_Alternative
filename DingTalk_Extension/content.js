@@ -2,6 +2,7 @@ console.log("🚀 DingTalk Auto-Pilot V21 (Local API) Loaded!");
 
 const LOCAL_TRANSCRIBE_URL = "http://127.0.0.1:54321/api/transcribe";
 const LOCAL_FORMALIZE_URL = "http://127.0.0.1:54321/api/formalize";
+const LOCAL_PHYSICAL_CLICK_URL = "http://127.0.0.1:54321/api/physical_click";
 
 let isAutoPilotOn = false;
 let isProcessing = false;
@@ -14,12 +15,21 @@ let minElapsedBeforeAcceptMs = Math.max(
 );
 let sensitiveFilterEnabled = localStorage.getItem("dingtag_sensitive_filter_enabled") !== "0";
 let nonTargetAutoInvalidEnabled = localStorage.getItem("dingtag_non_target_auto_invalid") !== "0";
+let autoSkipNoClassificationEnabled =
+    localStorage.getItem("dingtag_auto_skip_no_classification") !== "0";
+let noClassificationTimeoutMs = Math.max(
+    1000,
+    parseInt(localStorage.getItem("dingtag_no_classification_timeout_ms") || "8000", 10) || 8000
+);
 let activeTimeouts = [];
 let lastNoTargetLogAt = 0;
 let runTokenCounter = 0;
 let activeRunToken = 0;
 let lastProcessedTaskId = "";
 let lastSeenUrl = location.href;
+// ติดตาม task ใหม่ที่ยังไม่เจอ Classification — ใช้คำนวณว่าควร auto-skip เมื่อใด
+let noClassificationTaskId = "";
+let noClassificationStartedAt = 0;
 
 function clearAllTasks() {
     activeTimeouts.forEach(t => clearTimeout(t));
@@ -31,9 +41,14 @@ function clearAllTasks() {
 }
 
 function resetTaskGate(reason = "unknown") {
-    if (!lastProcessedTaskId) return;
-    console.log(`[DingTag] reset task gate (${reason}) | cleared task: ${lastProcessedTaskId}`);
-    lastProcessedTaskId = "";
+    if (lastProcessedTaskId) {
+        console.log(`[DingTag] reset task gate (${reason}) | cleared task: ${lastProcessedTaskId}`);
+        lastProcessedTaskId = "";
+    }
+    if (noClassificationTaskId) {
+        noClassificationTaskId = "";
+        noClassificationStartedAt = 0;
+    }
 }
 
 function setTextareaValueAndNotify(ta, value) {
@@ -156,7 +171,7 @@ async function postTranscribe(audioBase64) {
     }
 
     const qc = data.qc || {};
-    console.log(
+    const logParts = [
         "[DingTag] API ตอบกลับ:",
         data.status,
         "| isSensitive:",
@@ -166,8 +181,19 @@ async function postTranscribe(audioBase64) {
         "englishRatio:",
         qc.englishRatio,
         "source:",
-        qc.nonTargetSource
-    );
+        qc.nonTargetSource,
+    ];
+    if (qc.foreignScript) {
+        logParts.push(
+            "| foreignScript:",
+            qc.foreignScript,
+            "count:",
+            qc.foreignScriptCount,
+            "share:",
+            qc.foreignScriptShare
+        );
+    }
+    console.log(...logParts);
     return { ok: true, data };
 }
 
@@ -209,6 +235,80 @@ async function postFormalize(text) {
             ok: false,
             data,
             errorLabel: "Formal API error " + res.status,
+            detail: (data && (data.message || data.detail)) || rawText.slice(0, 200),
+        };
+    }
+    return { ok: true, data };
+}
+
+/**
+ * เก็บข้อมูล geometry ของ element + browser window เพื่อให้ Python คำนวณพิกัดจริงบนจอ
+ * Return null ถ้า element ไม่มี / มองไม่เห็น / ขนาด 0
+ */
+function getElementScreenGeometry(el) {
+    if (!el || typeof el.getBoundingClientRect !== "function") return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    return {
+        x: cx,
+        y: cy,
+        screenX: window.screenX || window.screenLeft || 0,
+        screenY: window.screenY || window.screenTop || 0,
+        outerWidth: window.outerWidth || window.innerWidth,
+        outerHeight: window.outerHeight || window.innerHeight,
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        devicePixelRatio: window.devicePixelRatio || 1,
+    };
+}
+
+/**
+ * สั่ง Python กดเมาส์จริงๆ ที่ตำแหน่ง element (ใช้แทน el.click() ในเคสที่ JS click ไม่ผ่าน)
+ * geom: ผลจาก getElementScreenGeometry()
+ */
+async function postPhysicalClick(geom, { description = "", button = "left", moveDurationMs = 120, restorePosition = true } = {}) {
+    if (!geom) {
+        return { ok: false, errorLabel: "ไม่มี geometry", detail: "element rect ใช้ไม่ได้" };
+    }
+    const payload = JSON.stringify({
+        ...geom,
+        button,
+        moveDurationMs,
+        description,
+        restorePosition,
+    });
+    let res;
+    try {
+        res = await fetch(LOCAL_PHYSICAL_CLICK_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload,
+        });
+    } catch (e) {
+        return {
+            ok: false,
+            errorLabel: "เชื่อมต่อ Physical Click API ไม่ได้",
+            detail: (e?.name || "Error") + ": " + (e?.message || String(e)),
+        };
+    }
+    const rawText = await res.text();
+    let data;
+    try {
+        data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+        return {
+            ok: false,
+            errorLabel: "Physical Click API ตอบกลับผิดรูปแบบ",
+            detail: "HTTP " + res.status + " — " + (rawText.slice(0, 120) || "(ว่าง)"),
+        };
+    }
+    if (!res.ok || data.status === "error") {
+        return {
+            ok: false,
+            data,
+            errorLabel: "Physical Click API error " + res.status,
             detail: (data && (data.message || data.detail)) || rawText.slice(0, 200),
         };
     }
@@ -402,6 +502,61 @@ nonTargetToggle.addEventListener("change", () => {
     );
 });
 
+const autoSkipRow = document.createElement("div");
+autoSkipRow.style.display = "flex";
+autoSkipRow.style.alignItems = "center";
+autoSkipRow.style.justifyContent = "space-between";
+autoSkipRow.style.gap = "8px";
+autoSkipRow.style.marginTop = "10px";
+settingsContainer.appendChild(autoSkipRow);
+
+const autoSkipLabel = document.createElement("label");
+autoSkipLabel.innerText = "⏭️ Auto-Skip (ไม่มี Classification)";
+autoSkipLabel.style.fontSize = "12px";
+autoSkipLabel.style.cursor = "pointer";
+autoSkipRow.appendChild(autoSkipLabel);
+
+const autoSkipToggle = document.createElement("input");
+autoSkipToggle.type = "checkbox";
+autoSkipToggle.checked = autoSkipNoClassificationEnabled;
+autoSkipToggle.style.cursor = "pointer";
+autoSkipToggle.title = "ถ้า task ใหม่ไม่มี Classification ภายในเวลาที่ตั้ง → Shift+↓ ข้าม";
+autoSkipRow.appendChild(autoSkipToggle);
+
+autoSkipLabel.addEventListener("click", () => {
+    autoSkipToggle.checked = !autoSkipToggle.checked;
+    autoSkipToggle.dispatchEvent(new Event("change"));
+});
+
+autoSkipToggle.addEventListener("change", () => {
+    autoSkipNoClassificationEnabled = autoSkipToggle.checked;
+    localStorage.setItem(
+        "dingtag_auto_skip_no_classification",
+        autoSkipNoClassificationEnabled ? "1" : "0"
+    );
+    console.log("[DingTag] Auto-skip (no Classification):", autoSkipNoClassificationEnabled ? "ON" : "OFF");
+});
+
+const autoSkipTimeoutLabel = document.createElement("div");
+autoSkipTimeoutLabel.style.fontSize = "12px";
+autoSkipTimeoutLabel.style.marginTop = "8px";
+settingsContainer.appendChild(autoSkipTimeoutLabel);
+const autoSkipTimeoutSlider = document.createElement("input");
+autoSkipTimeoutSlider.type = "range";
+autoSkipTimeoutSlider.min = "2000";
+autoSkipTimeoutSlider.max = "30000";
+autoSkipTimeoutSlider.step = "500";
+autoSkipTimeoutSlider.value = String(noClassificationTimeoutMs);
+autoSkipTimeoutSlider.style.width = "100%";
+autoSkipTimeoutSlider.title = "รอ Classification นานสุดเท่านี้ ก่อน Shift+↓ ข้าม";
+settingsContainer.appendChild(autoSkipTimeoutSlider);
+
+autoSkipTimeoutSlider.addEventListener("input", (e) => {
+    noClassificationTimeoutMs = Math.max(1000, parseInt(e.target.value, 10) || 8000);
+    localStorage.setItem("dingtag_no_classification_timeout_ms", String(noClassificationTimeoutMs));
+    updateLabels();
+});
+
 panel.appendChild(settingsContainer);
 document.body.appendChild(panel);
 
@@ -412,6 +567,7 @@ function updateLabels() {
         minElapsedBeforeAcceptMs <= 0
             ? `🛡️ ก่อนกด Accept อย่างน้อย: ปิด (ไม่บังคับ)`
             : `🛡️ ก่อนกด Accept อย่างน้อย: ${(minElapsedBeforeAcceptMs / 1000).toFixed(0)} วิ (งานเร็วเกินจะรอให้ครบ)`;
+    autoSkipTimeoutLabel.innerText = `⏭️ Auto-Skip timeout: ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ`;
 }
 updateLabels();
 
@@ -545,6 +701,73 @@ function findAntCheckboxByName(checkboxName) {
     );
 }
 
+/**
+ * Physical click (Python pyautogui) ที่ checkbox + verify ว่า state เปลี่ยนแล้ว
+ * - คลิกที่ <label> หรือ .ant-checkbox parent (ไม่ใช่ input ที่ซ่อนอยู่) เพื่อให้พิกัดมองเห็นจริง
+ * - ถ้า fail → ผู้เรียกควร fallback ไป clickAntCheckboxByNameAndVerify (JS click)
+ */
+async function physicalTickAntCheckboxByName(
+    checkboxName,
+    { tries = 3, intervalMs = 500, logLabel = "checkbox", moveDurationMs = 600 } = {}
+) {
+    for (let i = 1; i <= tries; i++) {
+        if (!isAutoPilotOn) return { ok: false, reason: "autopilot_off" };
+        const input = findAntCheckboxByName(checkboxName);
+        if (!input) {
+            console.warn(`⚠️ Physical checkbox ${logLabel}: ไม่พบ input (${i}/${tries})`);
+            await delay(intervalMs);
+            continue;
+        }
+        if (input.checked) return { ok: true, reason: "already_checked" };
+
+        const clickTarget =
+            input.closest("label") ||
+            input.closest(".ant-checkbox-wrapper") ||
+            input.closest(".ant-checkbox") ||
+            input;
+        try {
+            clickTarget.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+        await delay(120);
+
+        const geom = getElementScreenGeometry(clickTarget);
+        if (!geom) {
+            console.warn(`⚠️ Physical checkbox ${logLabel}: หา geometry ไม่ได้ (${i}/${tries})`);
+            await delay(intervalMs);
+            continue;
+        }
+        console.log(
+            `🖱️ Physical click checkbox ${logLabel} (${i}/${tries}) → ส่งพิกัดให้ Python (เลื่อน ${moveDurationMs}ms)`
+        );
+        const pcRes = await postPhysicalClick(geom, {
+            description: `Checkbox ${logLabel} (${i}/${tries})`,
+            button: "left",
+            moveDurationMs,
+            restorePosition: true,
+        });
+        if (!pcRes.ok) {
+            console.warn(
+                `⚠️ Physical click checkbox ${logLabel}: ${pcRes.errorLabel} — ${pcRes.detail}`
+            );
+            await delay(intervalMs);
+            continue;
+        }
+        console.log(
+            `✅ Physical click checkbox ${logLabel} สำเร็จ @ ${pcRes.data?.clickedAt?.join(",")}`
+        );
+        await delay(300);
+
+        // verify state ใหม่
+        const cb2 = findAntCheckboxByName(checkboxName);
+        if (cb2 && cb2.checked) return { ok: true, reason: "checked_physical" };
+        console.warn(
+            `⚠️ Physical click checkbox ${logLabel}: คลิกแล้ว แต่ยังไม่ติ๊ก (${i}/${tries})`
+        );
+        await delay(intervalMs);
+    }
+    return { ok: false, reason: "not_checked" };
+}
+
 async function clickAntCheckboxByNameAndVerify(checkboxName, { tries = 12, intervalMs = 350, logLabel = "checkbox" } = {}) {
     for (let i = 1; i <= tries; i++) {
         if (!isAutoPilotOn) return { ok: false, reason: "autopilot_off" };
@@ -586,6 +809,55 @@ function blurActiveTextInput() {
         }
     } catch (e) {
         console.warn("[DingTag] blurActiveTextInput error:", e?.name, e?.message);
+    }
+    return false;
+}
+
+/**
+ * ส่ง Shift+ArrowDown ไปยัง document.body เพื่อเลื่อนไป task ถัดไป
+ * (shortcut ของ Label Studio)
+ */
+function dispatchShiftArrowDown() {
+    const target = document.body || document.documentElement;
+    if (!target) return false;
+    const opts = {
+        key: "ArrowDown",
+        code: "ArrowDown",
+        keyCode: 40,
+        which: 40,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+    };
+    try {
+        target.dispatchEvent(new KeyboardEvent("keydown", opts));
+        target.dispatchEvent(new KeyboardEvent("keyup", opts));
+        return true;
+    } catch (e) {
+        console.warn("[DingTag] dispatchShiftArrowDown error:", e?.name, e?.message);
+        return false;
+    }
+}
+
+/**
+ * เลื่อนไป task ถัดไปด้วย Shift+ArrowDown
+ * 1) blur textarea/input ที่ค้างอยู่ (ถ้ามี)
+ * 2) focus document.body เพื่อให้ shortcut handler รับ event ได้
+ * 3) dispatch Shift+ArrowDown
+ */
+async function goToNextTask({ runToken } = {}) {
+    if (runToken != null && !isRunActive(runToken)) return false;
+    if (blurActiveTextInput()) {
+        console.log("👀 blur textarea/input ก่อนส่ง Shift+ArrowDown");
+    }
+    try {
+        if (document.body && typeof document.body.focus === "function") {
+            document.body.focus();
+        }
+    } catch {}
+    if (dispatchShiftArrowDown()) {
+        console.log("⏭️ ส่ง Shift+ArrowDown เพื่อไป task ถัดไปแล้ว");
+        return true;
     }
     return false;
 }
@@ -633,6 +905,350 @@ function safeClickEl(el) {
     }
 }
 
+/**
+ * คลิกแบบ "เต็มชุด event" — pointerdown / mousedown / pointerup / mouseup / click
+ * บางส่วนของ Label Studio (React) ฟัง mousedown ไม่ใช่แค่ click จึงต้องยิงครบเพื่อให้ state update
+ */
+function fireFullMouseClick(el) {
+    if (!el) return false;
+    try {
+        el.scrollIntoView?.({ block: "center", inline: "center" });
+    } catch {}
+    try {
+        const rect = el.getBoundingClientRect();
+        const x = rect.left + Math.max(1, rect.width / 2);
+        const y = rect.top + Math.max(1, rect.height / 2);
+        const opts = {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: x,
+            clientY: y,
+            button: 0,
+        };
+        try {
+            el.dispatchEvent(new PointerEvent("pointerdown", opts));
+        } catch {
+            try {
+                el.dispatchEvent(new MouseEvent("pointerdown", opts));
+            } catch {}
+        }
+        el.dispatchEvent(new MouseEvent("mousedown", opts));
+        try {
+            el.dispatchEvent(new PointerEvent("pointerup", opts));
+        } catch {
+            try {
+                el.dispatchEvent(new MouseEvent("pointerup", opts));
+            } catch {}
+        }
+        el.dispatchEvent(new MouseEvent("mouseup", opts));
+        el.dispatchEvent(new MouseEvent("click", opts));
+        return true;
+    } catch (e) {
+        console.warn("[DingTag] fireFullMouseClick error:", e?.name, e?.message);
+        return false;
+    }
+}
+
+/**
+ * Robust JS click — แทน pyautogui Physical click
+ * รวมทุก trick ที่ทำให้ React/Label Studio component "เชื่อ" ว่าคลิกจริง:
+ *   1) ตรวจ DOM/disabled/aria-disabled — รอจนพร้อม (ลองได้สูงสุด `tries`)
+ *   2) scrollIntoView (block: center) แล้ว wait double rAF ให้ React render เสร็จ
+ *   3) Event ครบ chain (composed: true เผื่อ Shadow DOM):
+ *        pointerover → mouseover → pointerenter → mouseenter
+ *        → pointermove → mousemove
+ *        → focus()
+ *        → pointerdown → mousedown
+ *        → pointerup   → mouseup
+ *        → click
+ *        → el.click()   (เผื่อกรณี React ผูกที่ native onClick)
+ *   4) ใช้ viewport coordinate จริง (rect.left + rect.width/2, rect.top + rect.height/2)
+ *      — ไม่ขึ้นกับขนาดจอ/DPI/multi-monitor (ต่างจาก pyautogui)
+ *   5) Fallback ท้ายสุด: focus + KeyboardEvent Enter (บาง button รับ Enter)
+ * Return: { ok, reason }
+ */
+async function robustClick(el, { tries = 3, intervalMs = 200, runToken, logLabel = "robustClick" } = {}) {
+    if (!el) return { ok: false, reason: "no_element" };
+
+    const waitDoubleRaf = () =>
+        new Promise((resolve) => {
+            try {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+            } catch {
+                resolve();
+            }
+        });
+
+    const isDisabled = (node) => {
+        if (!node) return true;
+        if (node.disabled) return true;
+        if (node.hasAttribute?.("disabled")) return true;
+        if (node.getAttribute?.("aria-disabled") === "true") return true;
+        return false;
+    };
+
+    for (let i = 1; i <= tries; i++) {
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale" };
+        }
+        if (!document.contains(el)) {
+            return { ok: false, reason: "element_removed" };
+        }
+        if (isDisabled(el)) {
+            console.warn(`⚠️ ${logLabel}: element ยัง disabled (${i}/${tries})`);
+            await delay(intervalMs);
+            continue;
+        }
+
+        try {
+            el.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+        await waitDoubleRaf();
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale" };
+        }
+
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+            console.warn(`⚠️ ${logLabel}: element ขนาด 0 (${i}/${tries})`);
+            await delay(intervalMs);
+            continue;
+        }
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+
+        const baseMouseOpts = {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: window,
+            clientX: x,
+            clientY: y,
+            screenX: x,
+            screenY: y,
+            button: 0,
+            buttons: 1,
+        };
+        const releaseMouseOpts = { ...baseMouseOpts, buttons: 0 };
+        const pointerOpts = {
+            ...baseMouseOpts,
+            pointerType: "mouse",
+            pointerId: 1,
+            isPrimary: true,
+            pressure: 0.5,
+            width: 1,
+            height: 1,
+        };
+        const releasePointerOpts = {
+            ...releaseMouseOpts,
+            pointerType: "mouse",
+            pointerId: 1,
+            isPrimary: true,
+            pressure: 0,
+            width: 1,
+            height: 1,
+        };
+
+        const safeDispatch = (target, evt) => {
+            try {
+                target.dispatchEvent(evt);
+            } catch {}
+        };
+        const makePointer = (type, opts) => {
+            try {
+                return new PointerEvent(type, opts);
+            } catch {
+                return new MouseEvent(type, opts);
+            }
+        };
+
+        try {
+            safeDispatch(el, makePointer("pointerover", pointerOpts));
+            safeDispatch(el, new MouseEvent("mouseover", baseMouseOpts));
+            safeDispatch(el, makePointer("pointerenter", { ...pointerOpts, bubbles: false }));
+            safeDispatch(el, new MouseEvent("mouseenter", { ...baseMouseOpts, bubbles: false }));
+            safeDispatch(el, makePointer("pointermove", pointerOpts));
+            safeDispatch(el, new MouseEvent("mousemove", baseMouseOpts));
+
+            try {
+                el.focus?.({ preventScroll: true });
+            } catch {}
+
+            safeDispatch(el, makePointer("pointerdown", pointerOpts));
+            safeDispatch(el, new MouseEvent("mousedown", baseMouseOpts));
+            safeDispatch(el, makePointer("pointerup", releasePointerOpts));
+            safeDispatch(el, new MouseEvent("mouseup", releaseMouseOpts));
+            safeDispatch(el, new MouseEvent("click", releaseMouseOpts));
+
+            try {
+                el.click?.();
+            } catch {}
+
+            console.log(`✅ ${logLabel}: คลิกสำเร็จ (${i}/${tries}) @ viewport(${x.toFixed(0)},${y.toFixed(0)})`);
+            return { ok: true, reason: "clicked_robust" };
+        } catch (e) {
+            console.warn(`[DingTag] ${logLabel} dispatch error (${i}/${tries}):`, e?.name, e?.message);
+        }
+
+        await delay(intervalMs);
+    }
+
+    try {
+        el.focus?.({ preventScroll: true });
+        const enterOpts = {
+            key: "Enter",
+            code: "Enter",
+            keyCode: 13,
+            which: 13,
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+        };
+        el.dispatchEvent(new KeyboardEvent("keydown", enterOpts));
+        el.dispatchEvent(new KeyboardEvent("keypress", enterOpts));
+        el.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
+        console.log(`⌨️ ${logLabel}: Fallback กด Enter บน element ที่ focus`);
+        return { ok: true, reason: "clicked_enter" };
+    } catch {}
+
+    return { ok: false, reason: "all_failed" };
+}
+
+/**
+ * blur active element แบบกว้างกว่า blurActiveTextInput — รวม button / checkbox / div tabindex
+ * เพราะหลังกด checkbox ใน dropdown "Non-Target Language" focus มักค้างที่ checkbox/label
+ * ทำให้ Update ยัง disabled
+ */
+function blurAnyActiveElement() {
+    try {
+        const active = document.activeElement;
+        if (
+            active &&
+            active !== document.body &&
+            active !== document.documentElement &&
+            typeof active.blur === "function"
+        ) {
+            active.blur();
+            return true;
+        }
+    } catch {}
+    return false;
+}
+
+/** ยิง Escape เพื่อปิด dropdown/popup ของ Label Studio ที่ค้างอยู่หลังเลือก Invalid reason */
+function dispatchEscape() {
+    const target = document.activeElement || document.body || document.documentElement;
+    if (!target) return false;
+    const opts = {
+        key: "Escape",
+        code: "Escape",
+        keyCode: 27,
+        which: 27,
+        bubbles: true,
+        cancelable: true,
+    };
+    try {
+        target.dispatchEvent(new KeyboardEvent("keydown", opts));
+        target.dispatchEvent(new KeyboardEvent("keyup", opts));
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * ยิง keyboard event ทั่วไป — ใช้สำหรับ hotkey ของ Label Studio เช่น 'w' = Verified
+ * โดยจะส่งทั้ง keydown และ keyup ที่ document.body เพื่อให้ LSF handler รับได้
+ */
+function dispatchHotkey(key, keyCode) {
+    const target = document.body || document.documentElement;
+    if (!target) return false;
+    const upper = String(key || "").toUpperCase();
+    const kc = keyCode || (upper ? upper.charCodeAt(0) : 0);
+    const opts = {
+        key,
+        code: upper.length === 1 ? `Key${upper}` : upper,
+        keyCode: kc,
+        which: kc,
+        bubbles: true,
+        cancelable: true,
+    };
+    try {
+        target.dispatchEvent(new KeyboardEvent("keydown", opts));
+        target.dispatchEvent(new KeyboardEvent("keyup", opts));
+        return true;
+    } catch (e) {
+        console.warn("[DingTag] dispatchHotkey error:", e?.name, e?.message);
+        return false;
+    }
+}
+
+/**
+ * หา element "Verified" ของ Label Studio
+ * รูปแบบ HTML ที่คาดหวัง:
+ *   <span ...>Verified<sup class="lsf-hint">[w]</sup></span>
+ * จึงยึด .lsf-hint ที่มีข้อความ [w] เป็น anchor แล้วเช็คว่า parent มีคำว่า "verified"
+ * ถ้าไม่เจอ จะ fallback ไปเช็ค .lsf-hint ทุกตัวที่ parent มี "verified"
+ */
+function findVerifiedHintButton() {
+    const hints = document.querySelectorAll(".lsf-hint");
+    let fallback = null;
+    for (const hint of hints) {
+        const hintText = (hint.textContent || "").trim().toLowerCase();
+        const parent = hint.parentElement;
+        if (!parent) continue;
+        const parentText = (parent.textContent || "").trim().toLowerCase();
+        if (!parentText.includes("verified")) continue;
+        if (/\[\s*w\s*\]/i.test(hintText)) {
+            return parent.closest('button, [role="button"], a, [tabindex]') || parent;
+        }
+        if (!fallback) {
+            fallback = parent.closest('button, [role="button"], a, [tabindex]') || parent;
+        }
+    }
+    return fallback;
+}
+
+/**
+ * คลิกปุ่ม Verified แบบยืดหยุ่น:
+ *  1) ลองหา .lsf-hint [w] แล้ว full-mouse-click parent (มี fallback เป็น .click())
+ *  2) ถ้ายังไม่เจอ → findClickableByContainsText(["verified"])
+ *  3) ถ้ายังไม่ได้อีก → fallback dispatch hotkey 'w'
+ */
+async function clickVerifiedButton({ tries = 6, intervalMs = 350, runToken } = {}) {
+    for (let i = 1; i <= tries; i++) {
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale" };
+        }
+        let btn = findVerifiedHintButton();
+        if (!btn) btn = findClickableByContainsText(["verified"]);
+        if (btn) {
+            try {
+                btn.scrollIntoView?.({ block: "center", inline: "center" });
+            } catch {}
+            await delay(100);
+            if (fireFullMouseClick(btn)) {
+                console.log(`✅ คลิก Verified สำเร็จ (full-mouse-click, ${i}/${tries})`);
+                return { ok: true, reason: "clicked_dom" };
+            }
+            try {
+                btn.click();
+                console.log(`✅ คลิก Verified สำเร็จ (.click(), ${i}/${tries})`);
+                return { ok: true, reason: "clicked_dom" };
+            } catch (e) {
+                console.warn("[DingTag] click Verified error:", e?.name, e?.message);
+            }
+        }
+        await delay(intervalMs);
+    }
+    if (dispatchHotkey("w", 87)) {
+        console.log("⌨️ Fallback: ส่งคีย์ 'w' (hotkey Verified)");
+        return { ok: true, reason: "hotkey_w" };
+    }
+    return { ok: false, reason: "not_found" };
+}
+
 function refocusClassification() {
     if (blurActiveTextInput()) {
         console.log("👀 blur textarea/input ก่อน refocus Classification");
@@ -648,6 +1264,119 @@ function refocusClassification() {
         return true;
     }
     return false;
+}
+
+/** หา textarea ของ Annotation Result (Label Studio LSF) แบบยืดหยุ่น */
+function findAnnotationResultTextarea() {
+    return (
+        document.querySelector('textarea[name="Annotation Result"]') ||
+        document.querySelector('textarea[name*="Annotation"]') ||
+        document.querySelector(".lsf-textarea-tag textarea") ||
+        document.querySelector("textarea")
+    );
+}
+
+/**
+ * Pre-Update sequence สำหรับ Non-Target flow โดยเฉพาะ
+ * ลำดับ (มี delay ระหว่างทุกขั้น):
+ *  1) คลิก Classification row แบบจำลองคลิกจริง (full mouse events)
+ *  2) คลิก Text Area (Annotation Result) + focus
+ *  3) blur active element ออก
+ *  4) กด Escape ปิด popup/dropdown ที่อาจค้าง
+ * ใช้แก้เคส "There was an error updating your Annotation" ที่เกิดเมื่อกด Update
+ * ก่อน Label Studio commit state ครบ
+ */
+async function prepareForNonTargetUpdate({ runToken } = {}) {
+    if (runToken != null && !isRunActive(runToken)) return false;
+    let didSomething = false;
+
+    // (1) คลิก Classification row แบบจริง
+    const row = findClassificationResultRow();
+    if (row && fireFullMouseClick(row)) {
+        console.log("🖱️ pre-update[1/4]: คลิก Classification row (จำลองจริง)");
+        didSomething = true;
+    } else {
+        console.warn("⚠️ pre-update[1/4]: ไม่พบ Classification row");
+    }
+    await delay(400);
+    if (runToken != null && !isRunActive(runToken)) return didSomething;
+
+    // (2) คลิก Text area (Annotation Result) + focus
+    const ta = findAnnotationResultTextarea();
+    if (ta) {
+        fireFullMouseClick(ta);
+        try {
+            ta.focus();
+        } catch {}
+        console.log("📝 pre-update[2/4]: คลิก + focus textarea Annotation Result");
+        didSomething = true;
+    } else {
+        console.warn("⚠️ pre-update[2/4]: ไม่พบ textarea Annotation Result");
+    }
+    await delay(350);
+    if (runToken != null && !isRunActive(runToken)) return didSomething;
+
+    // (3) blur active element ออก
+    if (blurAnyActiveElement()) {
+        console.log("👀 pre-update[3/4]: blur active element");
+        didSomething = true;
+    }
+    await delay(250);
+    if (runToken != null && !isRunActive(runToken)) return didSomething;
+
+    // (4) Escape ปิด popup/dropdown ที่อาจค้าง
+    if (dispatchEscape()) {
+        console.log("⎋ pre-update[4/4]: ส่ง Escape");
+        didSomething = true;
+    }
+    await delay(400);
+
+    return didSomething;
+}
+
+/**
+ * Sequence "ปลดล็อก" ปุ่ม Update — ใช้หลังกดเลือก Invalid reason (เช่น Data Missing)
+ * เพราะแค่ refocusClassification() ตัวเดียวไม่พอ บางครั้งเกิดเคส:
+ *   - dropdown เลือก reason ยังเปิดค้าง → คลิก Update ไม่โดน
+ *   - focus อยู่ที่ checkbox/label → React ยังไม่ commit state
+ *   - ใช้แค่ el.click() ไม่ trigger handler ที่ฟัง mousedown
+ *
+ * Steps:
+ *  1) Escape ปิด dropdown/menu ที่ยังเปิด
+ *  2) blur active element (ไม่จำกัดแค่ textarea/input)
+ *  3) full-mouse-click ที่ annotation card (parent ใหญ่)
+ *  4) full-mouse-click ที่ Classification row
+ */
+async function nudgeUnlockUpdate({ runToken } = {}) {
+    if (runToken != null && !isRunActive(runToken)) return false;
+    let nudged = false;
+
+    if (dispatchEscape()) {
+        console.log("⎋ nudge: ส่ง Escape ปิด dropdown/menu");
+        nudged = true;
+    }
+    if (blurAnyActiveElement()) {
+        console.log("👀 nudge: blur active element");
+        nudged = true;
+    }
+    await delay(160);
+    if (runToken != null && !isRunActive(runToken)) return nudged;
+
+    const card = findAnnotationCard();
+    if (card && fireFullMouseClick(card)) {
+        console.log("🖱️ nudge: full-click annotation card");
+        nudged = true;
+    }
+    await delay(140);
+    if (runToken != null && !isRunActive(runToken)) return nudged;
+
+    const row = findClassificationResultRow();
+    if (row && fireFullMouseClick(row)) {
+        console.log("🖱️ nudge: full-click Classification row");
+        nudged = true;
+    }
+    await delay(180);
+    return nudged;
 }
 
 function findSubmitUpdateButton() {
@@ -677,42 +1406,86 @@ function isUpdateButtonClickable(btn) {
 /**
  * ลำดับการทำงาน:
  * 1) เช็คปุ่ม Update — ถ้ากดได้ (ไม่ disabled) ก็กดเลย จบ
- * 2) ถ้า disabled => กด Classification เพื่อ refocus แล้ว delay 1 วิ
- * 3) เช็ค Update อีกครั้ง (Try ครั้งที่ 2) — ถ้ายังกดไม่ได้ ข้ามเลย
+ * 2) ถ้า disabled => (ถ้า useNudgeOnRetry=true) กด nudgeUnlockUpdate, ไม่งั้นแค่หน่วง
+ * 3) เช็ค Update อีกครั้ง (รอบถัดไป) — ถ้ายังกดไม่ได้ครบ maxTries ถึงข้าม
+ *
+ * Options:
+ *  - useNudgeOnRetry: true (default) → ใช้ nudgeUnlockUpdate ก่อนลอง Update รอบถัดไป
+ *                      false → ข้าม nudge, แค่หน่วง retryDelayMs แล้วลอง Update ใหม่ตรงๆ
+ *  - skipBlurBeforeCheck: true → ข้าม blurActiveTextInput() ก่อนเช็คปุ่ม Update
+ *                        false (default) → blur textarea/input ก่อนเช็คปุ่ม
+ *  - pressEscBeforeClick: true → กด Escape + delay สั้นๆ ก่อนกด Update "ทุกรอบ" (รวม retry)
+ *                         false (default) → ไม่ส่ง Escape
+ *  - escBeforeClickDelayMs: หน่วงหลังกด Escape (default 200ms)
+ *
+ * หมายเหตุ: ตั้งแต่เวอร์ชันนี้ใช้ robustClick() แทน pyautogui Physical click ทั้งหมด
+ *   เพราะ robustClick ทำงานบน viewport coordinate ใน Chrome → cross-machine 100%
+ *   (ไม่ขึ้นกับ DPI/screen size/multi-monitor) และ dispatch event chain เต็ม
+ *   (hover/focus/pointer/mouse/click + Enter fallback) ครอบคลุมเคส React ของ LS
  */
-async function clickUpdateWithEnabledCheck({ runToken, maxTries = 2, retryDelayMs = 1000 } = {}) {
+async function clickUpdateWithEnabledCheck({
+    runToken,
+    maxTries = 2,
+    retryDelayMs = 1000,
+    useNudgeOnRetry = true,
+    skipBlurBeforeCheck = false,
+    pressEscBeforeClick = false,
+    escBeforeClickDelayMs = 200,
+} = {}) {
     for (let i = 1; i <= maxTries; i++) {
         if (runToken != null && !isRunActive(runToken)) {
             return { ok: false, reason: "stale" };
         }
 
-        if (blurActiveTextInput()) {
+        if (!skipBlurBeforeCheck && blurActiveTextInput()) {
             console.log("👀 blur textarea/input ก่อนเช็คปุ่ม Update");
+        }
+
+        if (pressEscBeforeClick) {
+            if (dispatchEscape()) {
+                console.log(`⎋ ส่ง Escape ก่อนกด Update (ครั้งที่ ${i}/${maxTries})`);
+            }
+            if (escBeforeClickDelayMs > 0) {
+                await delay(escBeforeClickDelayMs);
+                if (runToken != null && !isRunActive(runToken)) {
+                    return { ok: false, reason: "stale" };
+                }
+            }
         }
 
         const btn = findSubmitUpdateButton();
         if (isUpdateButtonClickable(btn)) {
-            try {
-                btn.scrollIntoView?.({ block: "center", inline: "center" });
-            } catch {}
-            try {
-                btn.click();
-                console.log(`✅ กดปุ่ม Update สำเร็จ (ครั้งที่ ${i}/${maxTries})`);
-                return { ok: true, reason: "clicked" };
-            } catch (e) {
-                console.warn("[DingTag] update click error:", e?.name, e?.message);
+            const rcRes = await robustClick(btn, {
+                tries: 2,
+                intervalMs: 150,
+                runToken,
+                logLabel: `Update (${i}/${maxTries})`,
+            });
+            if (rcRes.reason === "stale") {
+                return { ok: false, reason: "stale" };
             }
+            if (rcRes.ok) {
+                return { ok: true, reason: rcRes.reason };
+            }
+            console.warn(`⚠️ robustClick Update ล้มเหลว (${i}/${maxTries}): ${rcRes.reason}`);
         } else {
             const why = !btn ? "ไม่เจอปุ่ม" : "ปุ่มยัง disabled";
             console.warn(`⚠️ Update ${why} (ครั้งที่ ${i}/${maxTries})`);
         }
 
         if (i < maxTries) {
-            const refocused = refocusClassification();
-            if (refocused) {
-                console.log(`🖱️ refocus Classification (<em>Valid/Invalid</em>) เพื่อปลดล็อก Update — รอ ${retryDelayMs}ms`);
+            if (useNudgeOnRetry) {
+                const nudged = await nudgeUnlockUpdate({ runToken });
+                if (runToken != null && !isRunActive(runToken)) {
+                    return { ok: false, reason: "stale" };
+                }
+                if (nudged) {
+                    console.log(`🧰 nudge Update unlock เสร็จ — รอ ${retryDelayMs}ms แล้วลองใหม่`);
+                } else {
+                    console.warn("⚠️ nudge Update ไม่เจอ element ใดๆ เลย — ลองรอแล้วเช็คอีกครั้ง");
+                }
             } else {
-                console.warn("⚠️ ไม่พบ Classification value element ตอนพยายามปลดล็อก Update");
+                console.log(`⏳ ข้าม nudge — รอ ${retryDelayMs}ms แล้วลองกด Update ใหม่`);
             }
             await delay(retryDelayMs);
         }
@@ -792,7 +1565,36 @@ async function waitForSelector(selector, { timeoutMs = 8000, intervalMs = 200 } 
 
 async function runInvalidReasonAcceptFlow(
     reasonText = "invalid flow",
-    { checkboxName, menuNeedles, logLabel = "reason", runToken, cycleStartAt }
+    {
+        checkboxName,
+        menuNeedles,
+        logLabel = "reason",
+        runToken,
+        cycleStartAt,
+        // ปรับพฤติกรรมก่อน/ระหว่างกด Update ต่อ flow ได้
+        // - skipNudgeBeforeUpdate: true → ข้าม nudge ก่อนกด Update ครั้งแรก
+        // - preUpdateDelayMs: เวลาที่หน่วงก่อนกด Update ครั้งแรก
+        // - useNudgeOnUpdateRetry: false → ระหว่าง retry Update ก็ไม่ nudge เช่นกัน (แค่หน่วงรอ)
+        // - updateMaxTries / updateRetryDelayMs: ตั้งจำนวนครั้งและช่วงเวลา retry Update
+        // - updateSkipBlurBeforeCheck: true → ข้าม blurActiveTextInput() ก่อนเช็คปุ่ม Update
+        // - useNonTargetPreUpdateSequence: true → ใช้ลำดับเฉพาะของ Non-Target
+        //    (คลิก Classification → คลิก Text area → blur → Escape) แทน nudge/skip-nudge
+        // - updatePressEscBeforeClick: true → กด Escape ก่อนกด Update ทุกครั้ง (รวม retry)
+        // - preCheckboxDelayMs: หน่วงก่อนติ๊ก checkbox (หลังเปิดเมนูเลือก reason)
+        //
+        // หมายเหตุ: ตั้งแต่เวอร์ชันนี้ใช้ robustClick() แทน pyautogui Physical click
+        //   ทั้งการกด Update และติ๊ก checkbox — cross-machine ทำงานเหมือนกันทุกเครื่อง
+        skipNudgeBeforeUpdate = false,
+        preUpdateDelayMs = 250,
+        useNudgeOnUpdateRetry = true,
+        updateMaxTries = 4,
+        updateRetryDelayMs = 800,
+        updateSkipBlurBeforeCheck = false,
+        useNonTargetPreUpdateSequence = false,
+        updatePressEscBeforeClick = false,
+        updateEscBeforeClickDelayMs = 200,
+        preCheckboxDelayMs = 0,
+    }
 ) {
     console.log(`🚩 ${reasonText}: Invalid -> ${logLabel} -> Classification -> Update`);
 
@@ -808,6 +1610,18 @@ async function runInvalidReasonAcceptFlow(
     if (menuNeedles && menuNeedles.length) {
         await clickByContainsTextAndVerify(menuNeedles, { tries: 10, intervalMs: 350 });
     }
+
+    if (preCheckboxDelayMs > 0) {
+        console.log(
+            `⏳ invalid flow (${logLabel}): หน่วง ${preCheckboxDelayMs}ms หลังเปิดเมนู ก่อนติ๊ก checkbox`
+        );
+        setStatus(
+            `Invalid flow (${logLabel}): รอ ${(preCheckboxDelayMs / 1000).toFixed(1)} วิ ก่อนติ๊ก checkbox`
+        );
+        await delay(preCheckboxDelayMs);
+        if (runToken != null && !isRunActive(runToken)) return;
+    }
+
     const cbRes = await clickAntCheckboxByNameAndVerify(checkboxName, {
         tries: 12,
         intervalMs: 350,
@@ -818,27 +1632,73 @@ async function runInvalidReasonAcceptFlow(
         setStatus(`Invalid flow: ติ๊ก ${logLabel} ไม่สำเร็จ`);
         return;
     }
-    console.log(`✅ ติ๊ก ${logLabel} สำเร็จ`);
+    console.log(`✅ ติ๊ก ${logLabel} สำเร็จ (${cbRes.reason})`);
 
     await delay(350);
     if (runToken != null && cycleStartAt != null) {
         await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
         if (!isRunActive(runToken)) return;
     }
-    const refocusInvalid = refocusClassification();
-    if (refocusInvalid) {
-        console.log("🖱️ refocus Classification (<em>) ก่อน Update (invalid flow) แล้ว");
-    } else {
-        console.warn("⚠️ ไม่พบ Classification value element (invalid flow)");
-    }
 
-    const updRes = await clickUpdateWithEnabledCheck({ runToken, maxTries: 2, retryDelayMs: 1000 });
+    if (useNonTargetPreUpdateSequence) {
+        // เคส Non-Target: ลำดับเฉพาะ — คลิก Classification (จริง) → คลิก Text area → blur → Escape
+        console.log(
+            `🛠️ invalid flow (${logLabel}): pre-Update sequence ` +
+                `(Classification → Text area → blur → Escape) ก่อนกด Update`
+        );
+        setStatus(`Invalid flow (${logLabel}): เตรียม Update (Classification → Textarea → blur → Esc)`);
+        await prepareForNonTargetUpdate({ runToken });
+        if (runToken != null && !isRunActive(runToken)) return;
+    } else if (skipNudgeBeforeUpdate) {
+        // ข้าม nudge แค่หน่วงตามค่าที่กำหนดแล้วกด Update ตรงๆ
+        console.log(
+            `⏳ invalid flow (${logLabel}): ข้าม nudge — หน่วง ${preUpdateDelayMs}ms ก่อนกด Update`
+        );
+        setStatus(`Invalid flow (${logLabel}): รอ ${(preUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนกด Update`);
+        await delay(preUpdateDelayMs);
+    } else {
+        // หลังติ๊ก checkbox dropdown อาจเปิดค้าง / focus อยู่ที่ checkbox
+        // → nudge ปลดล็อกก่อนกด Update (Escape + blur + full-click annotation card/Classification row)
+        const nudgedBeforeUpdate = await nudgeUnlockUpdate({ runToken });
+        if (runToken != null && !isRunActive(runToken)) return;
+        if (nudgedBeforeUpdate) {
+            console.log("🧰 invalid flow: nudge ปลดล็อก Update เสร็จ → เช็คปุ่ม Update");
+        } else {
+            console.warn("⚠️ invalid flow: ไม่พบ element สำหรับ nudge — เช็คปุ่ม Update โดยตรง");
+        }
+        await delay(preUpdateDelayMs);
+    }
+    if (!isRunActive(runToken)) return;
+
+    const updRes = await clickUpdateWithEnabledCheck({
+        runToken,
+        maxTries: updateMaxTries,
+        retryDelayMs: updateRetryDelayMs,
+        useNudgeOnRetry: useNudgeOnUpdateRetry,
+        skipBlurBeforeCheck: updateSkipBlurBeforeCheck,
+        pressEscBeforeClick: updatePressEscBeforeClick,
+        escBeforeClickDelayMs: updateEscBeforeClickDelayMs,
+    });
     if (updRes.ok) {
-        setStatus("Invalid flow: ส่งงานแล้ว");
+        setStatus("Invalid flow: ส่งงานแล้ว — รอ 2 วิ ก่อน Shift+↓");
+        // หน่วง 2 วิ หลัง Update เหมือน Valid/Verified flows
+        await delay(2000);
+        if (runToken != null && !isRunActive(runToken)) return;
+        if (await goToNextTask({ runToken })) {
+            setStatus("Invalid flow: ส่ง Shift+↓ ไป task ถัดไปแล้ว");
+            await delay(600);
+        }
     } else if (updRes.reason === "stale") {
         return;
     } else {
-        setStatus("Invalid flow: ข้าม Update (ปุ่มยัง disabled)");
+        console.log("❌ Invalid flow: ปุ่ม Update ยัง disabled หลังลอง 2 ครั้ง -> Shift+↓");
+        setStatus("Invalid flow: ข้าม Update (ปุ่มยัง disabled) → ไป task ถัดไป");
+        await delay(500);
+        if (runToken != null && !isRunActive(runToken)) return;
+        if (await goToNextTask({ runToken })) {
+            setStatus("Invalid flow: ส่ง Shift+↓ ไป task ถัดไปแล้ว (ข้าม Update)");
+            await delay(600);
+        }
     }
 }
 
@@ -859,7 +1719,134 @@ async function runInvalidNonTargetLanguageAcceptFlow(reasonText = "non-target la
         logLabel: "Non-Target Language",
         runToken,
         cycleStartAt,
+        // Non-Target (ใช้ robustClick ทุกจุด — cross-machine ทำงานเหมือนกันทุกเครื่อง):
+        // • หลังกด Invalid + เปิดเมนู → หน่วง 1.5 วินาที ก่อนติ๊ก checkbox
+        // • ติ๊ก checkbox ด้วย JS click ปกติ (clickAntCheckboxByNameAndVerify)
+        // • pre-Update sequence (คลิก Classification → Text area → blur → Esc)
+        // • กด Escape ก่อน Update ทุกครั้ง
+        // • กด Update ด้วย robustClick (event chain เต็ม + Enter fallback)
+        preCheckboxDelayMs: 1500,
+        useNonTargetPreUpdateSequence: true,
+        useNudgeOnUpdateRetry: false,
+        updateMaxTries: 3,
+        updateRetryDelayMs: 800,
+        updateSkipBlurBeforeCheck: true,
+        updatePressEscBeforeClick: true,
+        updateEscBeforeClickDelayMs: 200,
     });
+}
+
+/**
+ * Flow ใหม่: เจอ Classification = Invalid → กด Esc → คลิก Verified → ลาก Mouse ไปกด Update
+ * (แทนพฤติกรรมเดิมที่ Shift+↓ ข้ามทั้งงาน)
+ *
+ * ขั้นตอน:
+ *  1) ส่ง Escape เพื่อปิด popup/dropdown ที่อาจค้างอยู่
+ *  2) คลิกปุ่ม "Verified" (hotkey [w]) — full-mouse-click หรือ fallback ส่งคีย์ 'w'
+ *  3) รอเวลาขั้นต่ำก่อน Accept ตามที่ตั้งไว้ (ถ้ามี)
+ *  4) blur active element + Esc อีกครั้ง ก่อนกด Update
+ *  5) Physical click ปุ่ม Update (เลื่อนเมาส์จริงผ่าน Python pyautogui)
+ *  6) ตรวจ popup "Ignore & Submit" ถ้าโผล่ก็ปิดให้
+ *  7) Shift+↓ ไป task ถัดไป
+ */
+async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
+    console.log("🚩 Invalid flow: Esc → Verified → Physical click Update");
+    setStatus("Invalid — กด Esc แล้วเปลี่ยนเป็น Verified");
+
+    if (dispatchEscape()) {
+        console.log("⎋ Invalid→Verified: ส่ง Escape ก่อนคลิก Verified");
+    }
+    blurAnyActiveElement();
+    await delay(400);
+    if (!isRunActive(runToken)) return;
+
+    const verRes = await clickVerifiedButton({ tries: 8, intervalMs: 400, runToken });
+    if (verRes.reason === "stale") return;
+    if (!verRes.ok) {
+        console.warn("⚠️ Invalid→Verified: ไม่พบปุ่ม Verified → Shift+↓ ข้าม");
+        setStatus("Invalid: ไม่พบ Verified → ไป task ถัดไป");
+        await delay(500);
+        if (!isRunActive(runToken)) return;
+        if (await goToNextTask({ runToken })) {
+            setStatus("Invalid: ส่ง Shift+↓ ไป task ถัดไปแล้ว (ไม่พบ Verified)");
+            await delay(600);
+        }
+        return;
+    }
+    setStatus(
+        verRes.reason === "hotkey_w"
+            ? "Invalid → ส่งคีย์ 'w' (Verified) แล้ว"
+            : "Invalid → คลิก Verified แล้ว"
+    );
+
+    await delay(700);
+    if (!isRunActive(runToken)) return;
+
+    if (cycleStartAt != null) {
+        await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
+        if (!isRunActive(runToken)) return;
+    }
+
+    if (blurAnyActiveElement()) {
+        console.log("👀 Invalid→Verified: blur active element ก่อนกด Update");
+    }
+    if (dispatchEscape()) {
+        console.log("⎋ Invalid→Verified: ส่ง Escape ก่อนกด Update");
+    }
+    await delay(300);
+    if (!isRunActive(runToken)) return;
+
+    const updRes = await clickUpdateWithEnabledCheck({
+        runToken,
+        maxTries: 3,
+        retryDelayMs: 800,
+        useNudgeOnRetry: false,
+        skipBlurBeforeCheck: true,
+        pressEscBeforeClick: true,
+        escBeforeClickDelayMs: 200,
+    });
+
+    if (updRes.reason === "stale") return;
+
+    if (updRes.ok) {
+        setStatus("Invalid→Verified: ส่งงานแล้ว — รอให้ระบบบันทึก");
+        // หน่วงให้ Label Studio commit งาน / โหลด task ถัดไป เสร็จก่อน
+        await delay(1500);
+        if (!isRunActive(runToken)) return;
+
+        const pop = await clickPopupAndVerify(["Ignore & Submit"], {
+            tries: 8,
+            intervalMs: 500,
+            waitDisappearMs: 2200,
+        });
+        if (pop.ok && pop.reason !== "not_found") {
+            console.log("✅ Invalid→Verified: popup ถูกกดและหายไปแล้ว");
+        }
+
+        // หน่วงเพิ่มก่อนส่ง Shift+↓ ตามคำสั่งผู้ใช้ — "หลังจากกด Update ให้ดีเลก่อน"
+        const postUpdateDelayMs = 2000;
+        console.log(
+            `⏳ Invalid→Verified: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
+        );
+        setStatus(
+            `Invalid→Verified: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`
+        );
+        await delay(postUpdateDelayMs);
+        if (!isRunActive(runToken)) return;
+        if (await goToNextTask({ runToken })) {
+            setStatus("Invalid→Verified: ส่ง Shift+↓ ไป task ถัดไปแล้ว");
+            await delay(600);
+        }
+    } else {
+        console.log("❌ Invalid→Verified: ปุ่ม Update ยัง disabled → Shift+↓");
+        setStatus("Invalid→Verified: ข้าม Update (disabled) → ไป task ถัดไป");
+        await delay(500);
+        if (!isRunActive(runToken)) return;
+        if (await goToNextTask({ runToken })) {
+            setStatus("Invalid→Verified: ส่ง Shift+↓ แล้ว (ข้าม Update)");
+            await delay(600);
+        }
+    }
 }
 
 function getCurrentTaskId() {
@@ -899,6 +1886,11 @@ setInterval(() => {
 
         const currentTaskId = getCurrentTaskId();
         if (targetEl) {
+            // เจอ Classification แล้ว — รีเซ็ตตัวจับเวลา auto-skip
+            if (noClassificationTaskId) {
+                noClassificationTaskId = "";
+                noClassificationStartedAt = 0;
+            }
             if (!currentTaskId) {
                 const now = Date.now();
                 if (now - lastNoTargetLogAt > 5000) {
@@ -939,9 +1931,8 @@ setInterval(() => {
                     if (!isRunActive(runToken)) return;
 
                     if (classificationValue === "invalid") {
-                        setStatus("Invalid — ข้ามถอดเสียง");
-                        console.log("⚡ Classification = Invalid -> ข้ามถอดเสียง");
-                        await runInvalidDataMissingAcceptFlow("Classification invalid", runToken, cycleStartAt);
+                        console.log("⚡ Classification = Invalid -> Esc → Verified → Physical click Update");
+                        await runInvalidToVerifiedFlow(runToken, cycleStartAt);
                         return;
                     }
 
@@ -991,15 +1982,35 @@ setInterval(() => {
 
                         const qc = data.qc || {};
                         if (nonTargetAutoInvalidEnabled && qc.isNonTarget === true) {
-                            console.warn(
+                            const warnParts = [
                                 "⚠️ QC Non-Target — englishRatio:",
                                 qc.englishRatio,
                                 "source:",
                                 qc.nonTargetSource,
-                                "— ข้ามการวางข้อความ และคงค่าเดิมไว้"
+                            ];
+                            if (qc.foreignScript) {
+                                warnParts.push(
+                                    "foreignScript:",
+                                    qc.foreignScript,
+                                    "count:",
+                                    qc.foreignScriptCount,
+                                    "share:",
+                                    qc.foreignScriptShare
+                                );
+                            }
+                            warnParts.push("— ข้ามการวางข้อความ และคงค่าเดิมไว้");
+                            console.warn(...warnParts);
+                            const statusSuffix = qc.foreignScript
+                                ? ` (${qc.foreignScript})`
+                                : "";
+                            setStatus(`Non-Target${statusSuffix} — ส่ง invalid flow`);
+                            await runInvalidNonTargetLanguageAcceptFlow(
+                                qc.foreignScript
+                                    ? `Non-target language (foreign script: ${qc.foreignScript})`
+                                    : "Non-target language (QC)",
+                                runToken,
+                                cycleStartAt
                             );
-                            setStatus("Non-Target — ส่ง invalid flow");
-                            await runInvalidNonTargetLanguageAcceptFlow("Non-target language (QC)", runToken, cycleStartAt);
                             return;
                         }
                         // Step A: วาง raw transcript ก่อน เพื่อให้มั่นใจว่า "ดูดเสียงมาจริง"
@@ -1042,19 +2053,42 @@ setInterval(() => {
                         console.warn("⚠️ ก่อนส่งงาน: ไม่พบ Classification value element");
                     }
 
-                    console.log("🔍 กำลังเช็คปุ่ม Update...");
+                    // Valid flow: ก่อนกด Update → blur active element + กด Escape
+                    // จากนั้นใช้ Physical click (Python pyautogui) เลื่อนเมาส์จริง ๆ ไปกดปุ่ม Update
+                    // เหมือนกับ Invalid → Verified flow เพื่อให้ Label Studio รับ click แน่นอน
+                    if (blurAnyActiveElement()) {
+                        console.log("👀 Valid flow: blur active element ก่อนกด Update");
+                    }
+                    if (dispatchEscape()) {
+                        console.log("⎋ Valid flow: ส่ง Escape ก่อนกด Update");
+                    }
+                    await delay(300);
+                    if (!isRunActive(runToken)) return;
+
+                    console.log("🔍 กำลังเช็คปุ่ม Update (robustClick)...");
                     const updMainRes = await clickUpdateWithEnabledCheck({
                         runToken,
-                        maxTries: 2,
+                        maxTries: 3,
                         retryDelayMs: 1000,
+                        useNudgeOnRetry: false,
+                        skipBlurBeforeCheck: true,
+                        pressEscBeforeClick: true,
+                        escBeforeClickDelayMs: 200,
                     });
                     if (!updMainRes.ok) {
                         if (updMainRes.reason === "stale") return;
-                        console.log("❌ 4. ข้ามการกด Update (ปุ่มยัง disabled หลังลอง 2 ครั้ง)");
-                        setStatus("ข้าม Update: ปุ่มยัง disabled");
+                        console.log("❌ 4. ข้ามการกด Update (ปุ่มยัง disabled หลังลอง 3 ครั้ง) -> Shift+↓");
+                        setStatus("ข้าม Update (ปุ่มยัง disabled) → ไป task ถัดไป");
+                        await delay(500);
+                        if (!isRunActive(runToken)) return;
+                        if (await goToNextTask({ runToken })) {
+                            setStatus("ส่ง Shift+↓ ไป task ถัดไปแล้ว (ข้าม Update)");
+                            await delay(600);
+                        }
                         return;
                     }
-                    console.log("✅ 4. กดปุ่ม Update สำเร็จ!");
+                    console.log("✅ 4. กดปุ่ม Update สำเร็จ! (robustClick)");
+                    setStatus("Valid: ส่งงานแล้ว — รอให้ระบบบันทึก");
 
                     await delay(1500);
                     if (!isRunActive(runToken)) return;
@@ -1071,6 +2105,21 @@ setInterval(() => {
                         console.warn("⚠️ 5. Popup ยังอยู่/ค้าง (ไม่มั่นใจว่ากดติด):", pop.reason);
                         setStatus("Popup ค้าง: Ignore & Submit");
                     }
+
+                    // หน่วงเพิ่มก่อนส่ง Shift+↓ ตามคำสั่งผู้ใช้ — "หลังจากกด Update ดีเล 2 วิ"
+                    const postUpdateDelayMs = 2000;
+                    console.log(
+                        `⏳ Valid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
+                    );
+                    setStatus(
+                        `Valid: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`
+                    );
+                    await delay(postUpdateDelayMs);
+                    if (!isRunActive(runToken)) return;
+                    if (await goToNextTask({ runToken })) {
+                        setStatus("ส่ง Shift+↓ ไป task ถัดไปแล้ว");
+                        await delay(600);
+                    }
                 } catch (e) {
                     console.error("Sequence Error:", e);
                     setStatus("เกิด error (ดู Console)");
@@ -1085,12 +2134,75 @@ setInterval(() => {
             })();
         } else {
             const now = Date.now();
-            if (now - lastNoTargetLogAt > 5000) {
-                lastNoTargetLogAt = now;
-                console.log(
-                    "⏳ ON อยู่ แต่ยังไม่เจอ target (Classification: Valid/Invalid) — ตรวจหน้าเว็บ/DOM/สิทธิ์ Extension"
-                );
-                setStatus("ยังไม่เจอ target (รอ Classification Valid/Invalid...)");
+            const currentTaskId = getCurrentTaskId();
+
+            if (
+                autoSkipNoClassificationEnabled &&
+                currentTaskId &&
+                currentTaskId !== lastProcessedTaskId
+            ) {
+                if (noClassificationTaskId !== currentTaskId) {
+                    // เริ่มต้นการรอ task ใหม่
+                    noClassificationTaskId = currentTaskId;
+                    noClassificationStartedAt = now;
+                    console.log(
+                        `⏳ task ใหม่ (${currentTaskId}) ยังไม่เจอ Classification — รอสูงสุด ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ ก่อน Shift+↓`
+                    );
+                    setStatus(`task ${currentTaskId}: รอ Classification...`);
+                } else {
+                    const waited = now - noClassificationStartedAt;
+                    if (waited >= noClassificationTimeoutMs) {
+                        // หมดเวลารอ → Shift+↓ ข้าม
+                        console.log(
+                            `⏭️ task ${currentTaskId}: ไม่มี Classification เกิน ${noClassificationTimeoutMs}ms → Shift+↓ ข้าม`
+                        );
+                        setStatus(`task ${currentTaskId}: ไม่มี Classification → Shift+↓`);
+                        const skipTaskId = currentTaskId;
+                        lastProcessedTaskId = skipTaskId;
+                        noClassificationTaskId = "";
+                        noClassificationStartedAt = 0;
+                        isProcessing = true;
+                        (async () => {
+                            try {
+                                const sent = await goToNextTask({ runToken: null });
+                                if (sent) {
+                                    console.log(`⏭️ auto-skip: ส่ง Shift+↓ จาก task ${skipTaskId} แล้ว`);
+                                } else {
+                                    console.warn(`⚠️ auto-skip: ส่ง Shift+↓ ไม่สำเร็จ (task ${skipTaskId})`);
+                                }
+                                await delay(800);
+                            } catch (e) {
+                                console.warn("[DingTag] auto-skip error:", e?.name, e?.message);
+                            } finally {
+                                isProcessing = false;
+                            }
+                        })();
+                        return;
+                    }
+                    if (now - lastNoTargetLogAt > 5000) {
+                        lastNoTargetLogAt = now;
+                        const remaining = Math.max(0, (noClassificationTimeoutMs - waited) / 1000);
+                        console.log(
+                            `⏳ รอ Classification ใน task ${currentTaskId} อีก ~${remaining.toFixed(1)} วิ ก่อน Shift+↓`
+                        );
+                        setStatus(
+                            `task ${currentTaskId}: รอ Classification (${remaining.toFixed(1)} วิ)`
+                        );
+                    }
+                }
+            } else {
+                // ไม่ครบเงื่อนไข auto-skip — รีเซ็ตการติดตามถ้ามี
+                if (noClassificationTaskId) {
+                    noClassificationTaskId = "";
+                    noClassificationStartedAt = 0;
+                }
+                if (now - lastNoTargetLogAt > 5000) {
+                    lastNoTargetLogAt = now;
+                    console.log(
+                        "⏳ ON อยู่ แต่ยังไม่เจอ target (Classification: Valid/Invalid) — ตรวจหน้าเว็บ/DOM/สิทธิ์ Extension"
+                    );
+                    setStatus("ยังไม่เจอ target (รอ Classification Valid/Invalid...)");
+                }
             }
         }
     } catch (e) {

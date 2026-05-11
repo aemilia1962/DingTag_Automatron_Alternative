@@ -124,23 +124,35 @@ Rules:
 """
 
 # ==========================================
-# 5. Non-target language (Thai-centric task scope)
+# 5. Non-target language (Central-Thai-centric task scope)
 # ==========================================
 # Used with MODERATION_MODEL (text). YES = clip is out of scope / should be treated as Non-Target Language invalid.
+# Strict mode: ONLY Central Thai (ภาษาไทยกลาง / Standard Thai) is target.
+# Regional Thai dialects (Northern, Isaan, Southern) and foreign languages → non-target.
 NON_TARGET_LANGUAGE_PROMPT = """
-You are a strict classifier for a Thai-centric speech transcription task.
+You are a STRICT classifier for a CENTRAL THAI (ภาษาไทยกลาง / Standard Thai) speech transcription task.
 
-The TARGET is: Thai language content, including regional/spoken Thai written in Thai script (e.g. Northern, Northeastern/Isaan, Southern Thai in Thai script), and normal mixed Thai with common English loanwords or short English phrases.
+TARGET — answer NO:
+- Standard / Central Thai (ภาษาไทยกลาง) — Bangkok-style standard written/spoken Thai.
+- Standard Thai mixed with common English loanwords or short English clauses (e.g. "ส่ง email ให้ลูกค้า", "เปิด VIP มั้ย", "ระบบ Fast Track").
+- Slightly accented standard Thai that still uses standard vocabulary and grammar.
 
-Answer YES (non-target / out of scope) ONLY if ANY of these is clearly true:
-- The transcript is MOSTLY English or another non-Thai language (not just a few loanwords or a short English clause).
-- The transcript is primarily another language (Chinese, Japanese, Korean, Arabic, etc.) even if some Thai appears.
-- The content is clearly unusable as Thai-target transcription work for reasons of wrong language, not audio quality.
+NON-TARGET — answer YES:
+1) Regional Thai DIALECTS that are clearly distinct from standard Central Thai, especially when dialect-specific particles/vocabulary appear, e.g.:
+   • Northern Thai / Kham Mueang (ภาษาเหนือ / กำเมือง):
+     คำชี้/สรรพนาม/อนุภาค เช่น "เปิ้น, ตั๋ว, สู, ตี้, อะหยัง, บ่ฮู้, อู้, จะใด, หื้อ, เน้อ, กา, ก่อ, จะอี้, จาว, ลุง/ป้อ/แม่อุ๊ย"
+   • Northeastern Thai / Isan / Lao (ภาษาอีสาน):
+     เช่น "บ่, สิ, เฮ็ด, เด้, แม่นบ่, แซ่บ, เอื้อย, อ้าย, จักหน่อย, นำ (= ด้วย), เบิ่ง, เว้า, ข่อย, จัง, เป็นจังได๋, ว่าจั่งซั่น"
+   • Southern Thai / Pak Tai (ภาษาใต้):
+     เช่น "หรอย, แหลง, ตู, นุ้ย, หวา, ไอ้หรอย, พรือ, หวันนี้, บ่าว (ใต้)"
+   • Other clearly identifiable Thai dialects/sub-dialects.
+2) Foreign languages (English-dominant, Chinese, Japanese, Korean, Lao non-Thai-script, Khmer, Burmese, Malay/Indonesian, Vietnamese, Arabic, etc.), even if mixed with a small amount of Thai.
+3) Transcripts that are mostly non-Thai script.
 
-Answer NO if:
-- Thai (any register) or Thai mixed with moderate English is dominant.
-- Regional Thai in Thai script.
-- You are uncertain — answer NO.
+Decision rules:
+- Answer YES only when dialect / foreign language is CLEAR and DOMINANT (multiple dialect markers, or majority of the text).
+- A single ambiguous word, a slight accent, or one common Thai colloquialism is NOT enough — answer NO.
+- If uncertain, prefer NO.
 
 Output ONLY the letters YES or NO. No punctuation, no spaces, no quotes, no explanation.
 """

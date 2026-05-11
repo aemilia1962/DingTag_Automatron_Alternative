@@ -246,6 +246,20 @@ class AppUI:
             text=f"โมเดลจัดข้อความ: {self.formal_model}",
             font=ctk.CTkFont(size=12),
             text_color="#ecf0f1",
+        ).pack(anchor="w", pady=(0, 6))
+
+        ctk.CTkLabel(
+            frame,
+            text="ภาษาเป้าหมาย: ไทยกลาง (Strict)",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#f1c40f",
+        ).pack(anchor="w", pady=(0, 2))
+
+        ctk.CTkLabel(
+            frame,
+            text="เหนือ/อีสาน/ใต้ • อังกฤษ/จีน/ญี่ปุ่น/เกาหลี/รัสเซีย/อาหรับ ฯลฯ → Invalid Non-Target",
+            font=ctk.CTkFont(size=10),
+            text_color="#bdc3c7",
         ).pack(anchor="w", pady=(0, 0))
 
     def _build_right_panel(self):

@@ -22,6 +22,112 @@ from openai import OpenAI
 import customtkinter as ctk
 from tkinter import messagebox
 
+# pyautogui ใช้สำหรับ "physical mouse click" จาก Python ไปที่หน้าจอจริง
+# โหลดแบบ optional — ถ้าไม่มีลิบนี้ ระบบทำงานต่อได้ (แค่ /api/physical_click จะคืน 503)
+try:
+    import pyautogui
+
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0.0
+    _PYAUTOGUI_AVAILABLE = True
+except Exception as _pa_err:  # ImportError / DISPLAY missing / etc.
+    pyautogui = None  # type: ignore
+    _PYAUTOGUI_AVAILABLE = False
+    print(f"⚠️ pyautogui ไม่พร้อมใช้งาน: {_pa_err} — /api/physical_click จะคืน 503")
+
+# Windows: ทำให้ process รับรู้ DPI scaling จริง → พิกัด pyautogui ตรงกับสิ่งที่ผู้ใช้เห็น
+if sys.platform.startswith("win"):
+    try:
+        import ctypes
+
+        # 1 = PROCESS_SYSTEM_DPI_AWARE (รองรับตั้งแต่ Windows 8.1+)
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception as _dpi_err:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # type: ignore[name-defined]
+        except Exception:
+            print(f"⚠️ ตั้ง DPI awareness ไม่ได้ ({_dpi_err}) — physical click อาจคลาดเคลื่อนบนจอ scale > 100%")
+
+
+def _get_virtual_screen_bounds():
+    """คืน (left, top, right, bottom) ของ virtual desktop = ผลรวมทุกจอที่ต่ออยู่
+
+    บน Windows ผ่าน GetSystemMetrics (รองรับ multi-monitor และจอที่อยู่ทางซ้าย/บนของจอหลัก)
+    ค่า left/top อาจเป็นลบ (เช่น จอที่ 2 อยู่ทางซ้ายของจอหลัก)
+
+    ถ้าไม่ใช่ Windows หรือดึงไม่สำเร็จ → fallback เป็นขนาดจอหลักจาก pyautogui
+    """
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            # ค่าคงที่ SM_*VIRTUALSCREEN
+            SM_XVIRTUALSCREEN = 76
+            SM_YVIRTUALSCREEN = 77
+            SM_CXVIRTUALSCREEN = 78
+            SM_CYVIRTUALSCREEN = 79
+            left = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
+            top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+            width = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+            height = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+            if width > 0 and height > 0:
+                return (left, top, left + width, top + height)
+        except Exception:
+            pass
+    if _PYAUTOGUI_AVAILABLE and pyautogui is not None:
+        try:
+            w, h = pyautogui.size()
+            return (0, 0, int(w), int(h))
+        except Exception:
+            pass
+    return (0, 0, 1920, 1080)
+
+
+def _smooth_move_to_via_setcursor(x0, y0, x1, y1, duration_s, tween_fn=None, steps_per_sec=120):
+    """เลื่อนเมาส์จาก (x0,y0) → (x1,y1) โดยใช้ Windows SetCursorPos ตรง ๆ
+
+    ใช้แทน pyautogui.moveTo() ในเคส multi-monitor — เพราะ pyautogui บางครั้ง clamp พิกัด
+    ระหว่างทางเข้าสู่จอหลัก ทำให้เมาส์ "วาบ" กลับจอหลักก่อนแล้วค่อยกระโดดไปจุดเป้า
+
+    - duration_s: ระยะเวลาเลื่อน (วินาที) — 0 = ย้ายทันทีโดยไม่ animate
+    - tween_fn: easing function (pytweening), default linear
+    - steps_per_sec: จำนวนเฟรมต่อวินาที (default 120 — ดูลื่นพอสมควร)
+    """
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    set_cursor_pos = user32.SetCursorPos
+
+    if duration_s <= 0:
+        set_cursor_pos(int(round(x1)), int(round(y1)))
+        return
+
+    total_steps = max(2, int(duration_s * steps_per_sec))
+    start_t = time.perf_counter()
+    end_t = start_t + duration_s
+    for step in range(1, total_steps + 1):
+        # ใช้ wall-clock progress แทน step ratio เพื่อให้แม่นยำกว่า
+        now = time.perf_counter()
+        if now >= end_t:
+            t = 1.0
+        else:
+            t = (now - start_t) / duration_s
+        try:
+            eased = float(tween_fn(t)) if tween_fn is not None else t
+        except Exception:
+            eased = t
+        eased = max(0.0, min(1.0, eased))
+        cx = x0 + (x1 - x0) * eased
+        cy = y0 + (y1 - y0) * eased
+        set_cursor_pos(int(round(cx)), int(round(cy)))
+        if t >= 1.0:
+            break
+        # หน่วงสั้น ๆ ให้ดูเป็นการเคลื่อนต่อเนื่อง
+        time.sleep(max(0.0, (1.0 / steps_per_sec)))
+    # ยืนยันตำแหน่งสุดท้ายอีกครั้ง (กันกรณี last step ไม่ตรงเป๊ะ)
+    set_cursor_pos(int(round(x1)), int(round(y1)))
+
 from prompts import (
     DINGTALK_PROMPT,
     formal_instruction,
@@ -52,6 +158,24 @@ class TranscribeRequest(BaseModel):
 
 class FormalizeRequest(BaseModel):
     text: str = Field(..., description="Plain transcript text")
+
+
+class PhysicalClickRequest(BaseModel):
+    """Browser ส่งพิกัดปุ่มมา (CSS viewport coord + window geometry) ให้ Python คลิกจริงๆ"""
+
+    x: float = Field(..., description="ตำแหน่ง X กลางปุ่ม ใน viewport (CSS pixel)")
+    y: float = Field(..., description="ตำแหน่ง Y กลางปุ่ม ใน viewport (CSS pixel)")
+    screenX: float = Field(..., description="window.screenX")
+    screenY: float = Field(..., description="window.screenY")
+    outerWidth: float = Field(..., description="window.outerWidth")
+    outerHeight: float = Field(..., description="window.outerHeight")
+    innerWidth: float = Field(..., description="window.innerWidth")
+    innerHeight: float = Field(..., description="window.innerHeight")
+    devicePixelRatio: float = Field(1.0, description="window.devicePixelRatio")
+    button: str = Field("left", description="left|right|middle")
+    moveDurationMs: int = Field(120, description="ระยะเวลาเลื่อนเมาส์ก่อนคลิก (ms)")
+    description: str = Field("", description="คำอธิบายสำหรับ log")
+    restorePosition: bool = Field(True, description="คืนตำแหน่งเมาส์เดิมหลังคลิกเสร็จ")
 
 
 @dataclass
@@ -234,6 +358,121 @@ def api_formalize(body: FormalizeRequest):
     except ValueError as e:
         return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
     except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@fastapi_app.post("/api/physical_click")
+def api_physical_click(body: PhysicalClickRequest):
+    """Physical mouse click ที่ระดับ OS — ใช้กับเคสที่ JS click ไม่ผ่าน (เช่น Label Studio Update button)
+
+    คำนวณพิกัด:
+      chrome_top  = outerHeight - innerHeight   (ความสูงรวมของ titlebar + toolbar)
+      chrome_side = (outerWidth - innerWidth) / 2 (border ซ้าย)
+      screen_x = screenX + chrome_side + body.x
+      screen_y = screenY + chrome_top + body.y
+
+    (process ถูก set เป็น DPI-aware ตอน import แล้ว → ใช้ logical pixel ตรงกับสิ่งที่ user เห็น)
+    """
+    if not _PYAUTOGUI_AVAILABLE or pyautogui is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "message": "pyautogui ไม่พร้อมใช้งาน — pip install pyautogui",
+            },
+        )
+
+    inst = _transcriber_instance
+    if inst is None or not inst.is_ai_active:
+        return {"status": "paused"}
+
+    try:
+        chrome_top = max(0.0, body.outerHeight - body.innerHeight)
+        chrome_side = max(0.0, (body.outerWidth - body.innerWidth) / 2.0)
+        sx = body.screenX + chrome_side + body.x
+        sy = body.screenY + chrome_top + body.y
+        x = int(round(sx))
+        y = int(round(sy))
+
+        # ใช้ "virtual desktop" (ผลรวมทุกจอ) แทนแค่จอหลัก เพื่อรองรับ multi-monitor
+        # (ถ้า Chrome อยู่บนจอที่ 2 พิกัด screen_x อาจ >= 1920 หรืออาจเป็นลบ
+        #  ถ้าจอที่ 2 อยู่ทางซ้าย — กรณีนี้ pyautogui.size() จะ false-reject)
+        vs_left, vs_top, vs_right, vs_bottom = _get_virtual_screen_bounds()
+        primary_w, primary_h = pyautogui.size()
+        in_bounds = vs_left <= x < vs_right and vs_top <= y < vs_bottom
+        if not in_bounds:
+            msg = (
+                f"พิกัดนอกจอ ({x},{y}) virtual=({vs_left},{vs_top})-({vs_right},{vs_bottom}) "
+                f"primary=({primary_w}x{primary_h}) "
+                f"viewport=({body.innerWidth}x{body.innerHeight}) "
+                f"screenXY=({body.screenX},{body.screenY})"
+            )
+            print(f"❌ Physical click: {msg}")
+            return JSONResponse(status_code=400, content={"status": "error", "message": msg})
+
+        button = body.button if body.button in ("left", "right", "middle") else "left"
+        desc = body.description or "physical click"
+        prev_x, prev_y = pyautogui.position()
+        duration_s = max(0.0, body.moveDurationMs / 1000.0)
+        # ใช้ ease-in-out ให้รู้สึกเป็นธรรมชาติเหมือนคนขยับเมาส์จริง
+        # (เริ่มช้า → เร่ง → ชะลอ ก่อนถึงเป้า)
+        try:
+            import pytweening as _pt
+
+            tween_fn = getattr(_pt, "easeInOutQuad", None) or getattr(_pt, "linear", None)
+        except Exception:
+            tween_fn = None
+        on_secondary = not (0 <= x < primary_w and 0 <= y < primary_h)
+        print(
+            f"🖱️ Physical click ({desc}) → ({x}, {y}) button={button} "
+            f"prevPos=({prev_x},{prev_y}) move={duration_s:.2f}s "
+            f"tween={'ease' if tween_fn else 'linear'} "
+            f"{'[secondary monitor]' if on_secondary else '[primary]'}"
+        )
+        # หมายเหตุ multi-monitor:
+        # บน Windows pyautogui ใช้ SetCursorPos → รองรับพิกัดข้ามจอได้ดี
+        # แต่บางครั้ง moveTo() ที่มี duration > 0 จะถูก pyautogui "clamp" เข้าจอหลัก
+        # ก่อนเลื่อน — แก้โดยเรียก moveTo(_pause=False) หรือใช้ ctypes SetCursorPos ตรง ๆ
+        # หาก target อยู่นอกจอหลัก จะใช้ SetCursorPos แบบ step ๆ เองเพื่อให้ดูเป็น "ลาก mouse"
+        if on_secondary and sys.platform.startswith("win"):
+            try:
+                _smooth_move_to_via_setcursor(prev_x, prev_y, x, y, duration_s, tween_fn)
+            except Exception as _move_err:
+                print(f"⚠️ smooth move (multi-monitor) ล้มเหลว → fallback pyautogui.moveTo: {_move_err}")
+                if tween_fn is not None:
+                    pyautogui.moveTo(x, y, duration=duration_s, tween=tween_fn)
+                else:
+                    pyautogui.moveTo(x, y, duration=duration_s)
+        else:
+            if tween_fn is not None:
+                pyautogui.moveTo(x, y, duration=duration_s, tween=tween_fn)
+            else:
+                pyautogui.moveTo(x, y, duration=duration_s)
+        pyautogui.click(x=x, y=y, button=button)
+
+        if body.restorePosition:
+            try:
+                back_duration = max(0.2, duration_s * 0.6)
+                back_on_secondary = not (
+                    0 <= prev_x < primary_w and 0 <= prev_y < primary_h
+                )
+                if (on_secondary or back_on_secondary) and sys.platform.startswith("win"):
+                    _smooth_move_to_via_setcursor(x, y, prev_x, prev_y, back_duration, tween_fn)
+                elif tween_fn is not None:
+                    pyautogui.moveTo(prev_x, prev_y, duration=back_duration, tween=tween_fn)
+                else:
+                    pyautogui.moveTo(prev_x, prev_y, duration=back_duration)
+            except Exception:
+                pass
+        return {
+            "status": "success",
+            "clickedAt": [x, y],
+            "virtualScreen": [vs_left, vs_top, vs_right, vs_bottom],
+            "primaryScreen": [primary_w, primary_h],
+            "onSecondaryMonitor": on_secondary,
+        }
+    except Exception as e:
+        print(f"❌ Physical click ผิดพลาด: {e}")
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
@@ -447,6 +686,129 @@ def latin_vs_thai_letter_ratio(text: str) -> float:
     return latin / denom
 
 
+def has_thai_chars(text: str) -> bool:
+    """True if at least one Thai script character (U+0E00..U+0E7F) is present."""
+    if not text:
+        return False
+    for ch in text:
+        if "\u0e00" <= ch <= "\u0e7f":
+            return True
+    return False
+
+
+# Foreign script detection (everything that is NOT Thai/Latin script).
+# Minimum absolute count + minimum share (relative to thai+latin+foreign letters)
+# used to declare the transcript as Non-Target.
+FOREIGN_SCRIPT_MIN_COUNT = 3
+FOREIGN_SCRIPT_MIN_SHARE = 0.20
+
+# Codepoint ranges for the foreign scripts we want to detect.
+_FOREIGN_SCRIPT_RANGES: tuple[tuple[str, int, int], ...] = (
+    # CJK Unified Ideographs + extensions + compatibility (Chinese / Han)
+    ("chinese", 0x4E00, 0x9FFF),
+    ("chinese", 0x3400, 0x4DBF),
+    ("chinese", 0xF900, 0xFAFF),
+    ("chinese", 0x20000, 0x2A6DF),
+    # Japanese kana (Hiragana + Katakana + Katakana phonetic extensions)
+    ("japanese", 0x3040, 0x309F),
+    ("japanese", 0x30A0, 0x30FF),
+    ("japanese", 0x31F0, 0x31FF),
+    # Korean (Hangul syllables + Jamo + Compatibility Jamo)
+    ("korean", 0xAC00, 0xD7AF),
+    ("korean", 0x1100, 0x11FF),
+    ("korean", 0x3130, 0x318F),
+    # Cyrillic (Russian, Ukrainian, etc.)
+    ("cyrillic", 0x0400, 0x04FF),
+    ("cyrillic", 0x0500, 0x052F),
+    # Arabic
+    ("arabic", 0x0600, 0x06FF),
+    ("arabic", 0x0750, 0x077F),
+    # Hebrew
+    ("hebrew", 0x0590, 0x05FF),
+    # Devanagari (Hindi, Marathi, Sanskrit, etc.)
+    ("devanagari", 0x0900, 0x097F),
+    # Greek
+    ("greek", 0x0370, 0x03FF),
+)
+
+FOREIGN_SCRIPT_LABELS: dict[str, str] = {
+    "chinese": "จีน (CJK)",
+    "japanese": "ญี่ปุ่น (ฮิรางานะ/คาตาคานะ)",
+    "korean": "เกาหลี (ฮันกึล)",
+    "cyrillic": "ซีริลลิก (รัสเซีย ฯลฯ)",
+    "arabic": "อาหรับ",
+    "hebrew": "ฮีบรู",
+    "devanagari": "เทวนาครี (ฮินดี ฯลฯ)",
+    "greek": "กรีก",
+}
+
+
+def count_script_chars(text: str) -> dict[str, int]:
+    """Count characters by script class.
+
+    Returns a dict with keys: thai, latin, chinese, japanese, korean,
+    cyrillic, arabic, hebrew, devanagari, greek.
+    Non-letter codepoints (digits, punctuation, whitespace) are ignored.
+    """
+    counts: dict[str, int] = {
+        "thai": 0,
+        "latin": 0,
+        "chinese": 0,
+        "japanese": 0,
+        "korean": 0,
+        "cyrillic": 0,
+        "arabic": 0,
+        "hebrew": 0,
+        "devanagari": 0,
+        "greek": 0,
+    }
+    if not text:
+        return counts
+    for ch in text:
+        if "A" <= ch <= "Z" or "a" <= ch <= "z":
+            counts["latin"] += 1
+            continue
+        cp = ord(ch)
+        if 0x0E00 <= cp <= 0x0E7F:
+            counts["thai"] += 1
+            continue
+        for label, start, end in _FOREIGN_SCRIPT_RANGES:
+            if start <= cp <= end:
+                counts[label] += 1
+                break
+    return counts
+
+
+def detect_dominant_foreign_script(text: str) -> tuple[str | None, int, float]:
+    """Detect the dominant foreign (non-Thai, non-Latin) script in `text`.
+
+    Returns (label, count, share):
+    - label: one of FOREIGN_SCRIPT_LABELS keys, or None if not significant.
+    - count: absolute number of characters in that script.
+    - share: count / (thai + latin + foreign_total). 0.0 if no letters.
+
+    "Significant" means: count >= FOREIGN_SCRIPT_MIN_COUNT AND
+    (no Thai at all, OR share >= FOREIGN_SCRIPT_MIN_SHARE).
+    A few Japanese/Chinese characters inside an otherwise Thai sentence
+    (e.g., brand names) will therefore NOT trigger Non-Target.
+    """
+    counts = count_script_chars(text)
+    foreign_keys = ("chinese", "japanese", "korean", "cyrillic", "arabic", "hebrew", "devanagari", "greek")
+    foreign_total = sum(counts[k] for k in foreign_keys)
+    best_key = max(foreign_keys, key=lambda k: counts[k])
+    best_count = counts[best_key]
+    total_letters = counts["thai"] + counts["latin"] + foreign_total
+    share = (best_count / total_letters) if total_letters > 0 else 0.0
+    if best_count <= 0:
+        return None, 0, 0.0
+    significant = best_count >= FOREIGN_SCRIPT_MIN_COUNT and (
+        counts["thai"] == 0 or share >= FOREIGN_SCRIPT_MIN_SHARE
+    )
+    if significant:
+        return best_key, best_count, share
+    return None, best_count, share
+
+
 def _qc_defaults() -> dict[str, float]:
     return {
         "non_target_english_ratio": DEFAULT_NON_TARGET_ENGLISH_RATIO,
@@ -627,17 +989,40 @@ class AITranscriberApp(AppUI, ctk.CTk):
         return parse_moderation_is_sensitive(mod_raw)
 
     def _classify_non_target_qc(self, result_text: str) -> dict[str, Any]:
-        """Heuristic English share + MODERATION_MODEL + NON_TARGET_LANGUAGE_PROMPT in gray zone."""
+        """Detect non-Central-Thai content (regional Thai dialects + foreign languages).
+
+        Flow:
+        0) เจออักษรต่างประเทศที่ไม่ใช่ไทย/ละติน (จีน/ญี่ปุ่น/เกาหลี/ซีริลลิก/อาหรับ/ฯลฯ)
+           → non-target ทันที (ไม่ต้องเรียก LLM)
+        1) ratio >= high      → non-target (English/foreign script dominant)
+        2) มีอักษรไทย / ratio >= low → ส่งเข้า LLM (NON_TARGET_LANGUAGE_PROMPT)
+           เพื่อจับภาษาถิ่น (เหนือ/อีสาน/ใต้) และภาษาต่างประเทศที่ปนภาษาไทยอยู่
+        3) อื่นๆ → ไม่ใช่ non-target
+        """
         cfg = getattr(self, "qc_config", None) or _qc_defaults()
         th = float(cfg.get("non_target_english_ratio", DEFAULT_NON_TARGET_ENGLISH_RATIO))
         low = float(cfg.get("non_target_gray_low", DEFAULT_NON_TARGET_GRAY_RATIO_LOW))
         ratio = latin_vs_thai_letter_ratio(result_text)
+        has_thai = has_thai_chars(result_text)
+
+        # (0) Fast path: clear non-Thai/non-Latin script (CJK, kana, Hangul, Cyrillic, ฯลฯ)
+        foreign_label, foreign_count, foreign_share = detect_dominant_foreign_script(result_text)
+        if foreign_label:
+            return {
+                "isNonTarget": True,
+                "englishRatio": round(ratio, 4),
+                "nonTargetSource": f"foreign_script_{foreign_label}",
+                "foreignScript": foreign_label,
+                "foreignScriptCount": foreign_count,
+                "foreignScriptShare": round(foreign_share, 4),
+            }
+
         is_non_target = False
-        source: str | None = "none"
+        source: str = "none"
         if ratio >= th:
             is_non_target = True
             source = "english_ratio"
-        elif ratio >= low:
+        elif has_thai or ratio >= low:
             raw = chat_completion_with_retry(
                 client,
                 [MODERATION_MODEL],
@@ -650,7 +1035,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 timeout=30,
             )
             is_non_target = parse_non_target_is_yes(raw)
-            source = "llm" if is_non_target else "none"
+            source = "llm_central_thai" if is_non_target else "none"
         return {
             "isNonTarget": is_non_target,
             "englishRatio": round(ratio, 4),
@@ -693,10 +1078,29 @@ class AITranscriberApp(AppUI, ctk.CTk):
         is_sensitive = self._moderate_text(result_text)
         qc = self._classify_non_target_qc(result_text)
         if qc.get("isNonTarget"):
-            print(
-                f"[API] QC Non-Target: englishRatio={qc.get('englishRatio')} "
-                f"source={qc.get('nonTargetSource')}"
-            )
+            src = qc.get("nonTargetSource") or ""
+            base_reasons = {
+                "english_ratio": "อักษรอังกฤษ/อักษรไม่ใช่ไทยมีสัดส่วนสูง",
+                "llm_central_thai": "ไม่ใช่ไทยกลาง (อาจเป็นภาษาถิ่น/ต่างประเทศ)",
+            }
+            if src.startswith("foreign_script_"):
+                key = src[len("foreign_script_"):]
+                label = FOREIGN_SCRIPT_LABELS.get(key, key)
+                reason_th = f"พบอักษรภาษา{label}"
+                print(
+                    f"[API] QC Non-Target → {reason_th} | "
+                    f"foreignScript={qc.get('foreignScript')} "
+                    f"count={qc.get('foreignScriptCount')} "
+                    f"share={qc.get('foreignScriptShare')} "
+                    f"englishRatio={qc.get('englishRatio')} "
+                    f"source={src}"
+                )
+            else:
+                reason_th = base_reasons.get(src, src or "unknown")
+                print(
+                    f"[API] QC Non-Target → {reason_th} | englishRatio={qc.get('englishRatio')} "
+                    f"source={src}"
+                )
         _session_stats_record_transcribe(time.time() - t0)
         return {"status": "success", "text": result_text, "isSensitive": is_sensitive, "qc": qc}
 
