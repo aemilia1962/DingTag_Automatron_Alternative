@@ -51,7 +51,7 @@ class AppUI:
     def setup_window(self, resource_path_fn):
         import os
 
-        self.title("AI Transcriber Pro")
+        self.title("Automatron")
         self.geometry("900x620")
         self.resizable(False, False)
         ctk.set_appearance_mode("dark")
@@ -101,7 +101,7 @@ class AppUI:
 
         ctk.CTkLabel(
             self.header_frame,
-            text="AI TEXT TOOLS",
+            text="Hell Bot",
             font=ctk.CTkFont(size=22, weight="bold"),
         ).pack(anchor="w")
 
