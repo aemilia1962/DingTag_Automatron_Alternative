@@ -30,6 +30,16 @@ let lastSeenUrl = location.href;
 // ติดตาม task ใหม่ที่ยังไม่เจอ Classification — ใช้คำนวณว่าควร auto-skip เมื่อใด
 let noClassificationTaskId = "";
 let noClassificationStartedAt = 0;
+// ตรวจจับเมื่อ task เด้งกลับบนสุด (bounce detection)
+let lastNavigatedTaskId = "";
+let bounceSkipInProgress = false;
+// Stuck task timeout: ถ้า task เดิมค้างนานเกินกำหนด → บังคับ Shift+↓
+let stuckTaskTimeoutMs = Math.max(
+    3000,
+    parseInt(localStorage.getItem("dingtag_stuck_task_timeout_ms") || "10000", 10) || 10000
+);
+let stuckTaskDetectedAt = 0;
+let stuckTaskId = "";
 
 function clearAllTasks() {
     activeTimeouts.forEach(t => clearTimeout(t));
@@ -557,6 +567,27 @@ autoSkipTimeoutSlider.addEventListener("input", (e) => {
     updateLabels();
 });
 
+const stuckTaskLabel = document.createElement("div");
+stuckTaskLabel.style.color = "#ccc";
+stuckTaskLabel.style.fontSize = "12px";
+stuckTaskLabel.style.marginTop = "8px";
+settingsContainer.appendChild(stuckTaskLabel);
+const stuckTaskSlider = document.createElement("input");
+stuckTaskSlider.type = "range";
+stuckTaskSlider.min = "3000";
+stuckTaskSlider.max = "30000";
+stuckTaskSlider.step = "1000";
+stuckTaskSlider.value = String(stuckTaskTimeoutMs);
+stuckTaskSlider.style.width = "100%";
+stuckTaskSlider.title = "ถ้า task เดิมค้างนานเกินนี้ → บังคับ Shift+↓ ไปงานถัดไป";
+settingsContainer.appendChild(stuckTaskSlider);
+
+stuckTaskSlider.addEventListener("input", (e) => {
+    stuckTaskTimeoutMs = Math.max(3000, parseInt(e.target.value, 10) || 10000);
+    localStorage.setItem("dingtag_stuck_task_timeout_ms", String(stuckTaskTimeoutMs));
+    updateLabels();
+});
+
 panel.appendChild(settingsContainer);
 document.body.appendChild(panel);
 
@@ -568,6 +599,7 @@ function updateLabels() {
             ? `🛡️ ก่อนกด Accept อย่างน้อย: ปิด (ไม่บังคับ)`
             : `🛡️ ก่อนกด Accept อย่างน้อย: ${(minElapsedBeforeAcceptMs / 1000).toFixed(0)} วิ (งานเร็วเกินจะรอให้ครบ)`;
     autoSkipTimeoutLabel.innerText = `⏭️ Auto-Skip timeout: ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ`;
+    stuckTaskLabel.innerText = `🔄 Stuck Task timeout: ${(stuckTaskTimeoutMs / 1000).toFixed(0)} วิ`;
 }
 updateLabels();
 
@@ -840,10 +872,92 @@ function dispatchShiftArrowDown() {
 }
 
 /**
+ * Scroll sidebar (virtualized task list) ให้ row ที่ selected อยู่ในมุมมอง
+ *
+ * โครงสร้าง DOM ของ DingTag sidebar:
+ *   div[overflow:auto; will-change:transform]        ← scroll container (viewport)
+ *     div[height: Npx]                              ← inner (total height for virtual scroll)
+ *       .lsf-table-head                             ← header
+ *       .lsf-table__row-wrapper                     ← แต่ละ row (position:absolute, top:Xpx)
+ *       .lsf-table__row-wrapper_selected            ← row ที่ active
+ */
+function scrollSidebarToActiveTask() {
+    try {
+        // หา selected row
+        const selectedRow = document.querySelector(".lsf-table__row-wrapper_selected");
+        if (!selectedRow) return false;
+
+        // หา scroll container — parent ที่มี overflow:auto และ will-change:transform
+        let scrollContainer = selectedRow.parentElement?.parentElement;
+        if (!scrollContainer) {
+            // fallback: ไล่ขึ้นหา element ที่ scrollable
+            let el = selectedRow.parentElement;
+            while (el && el !== document.body) {
+                const style = getComputedStyle(el);
+                if (
+                    (style.overflow === "auto" || style.overflow === "scroll" ||
+                     style.overflowY === "auto" || style.overflowY === "scroll") &&
+                    el.scrollHeight > el.clientHeight
+                ) {
+                    scrollContainer = el;
+                    break;
+                }
+                el = el.parentElement;
+            }
+        }
+        if (!scrollContainer) return false;
+
+        // คำนวณ position ของ selected row relative to scroll container (dynamic ทุกค่า)
+        const rowTop = parseInt(selectedRow.style.top, 10) || 0;
+        const rowHeight = selectedRow.offsetHeight || 70;
+        const viewportHeight = scrollContainer.clientHeight;
+        const currentScroll = scrollContainer.scrollTop;
+        const headerEl = scrollContainer.querySelector(".lsf-table-head") ||
+                         scrollContainer.children?.[0]?.querySelector(".lsf-table-head");
+        const headerHeight = headerEl?.offsetHeight || 42;
+        const bufferRows = 3;
+        const bufferPx = bufferRows * rowHeight;
+
+        // ตรวจว่า row อยู่ใน visible area (เผื่อ buffer 3 แถว) หรือไม่
+        const rowVisibleTop = rowTop - currentScroll;
+        const rowVisibleBottom = rowVisibleTop + rowHeight;
+
+        if (rowVisibleTop < headerHeight + bufferPx) {
+            // row อยู่เหนือ viewport (หรือใกล้ขอบบนเกิน) → scroll ขึ้น เผื่อ 3 แถวด้านบน
+            scrollContainer.scrollTop = rowTop - headerHeight - bufferPx;
+            console.log(`📜 sidebar scroll ↑ (เผื่อ ${bufferRows} แถวด้านบน)`);
+        } else if (rowVisibleBottom > viewportHeight - bufferPx) {
+            // row ใกล้ขอบล่างเกิน → scroll ลง เผื่อ 3 แถวด้านล่าง
+            scrollContainer.scrollTop = rowTop - viewportHeight + rowHeight + bufferPx + 10;
+            console.log(`📜 sidebar scroll ↓ (เผื่อ ${bufferRows} แถวด้านล่าง)`);
+        } else {
+            return true; // อยู่ใน viewport พร้อม buffer เพียงพอ
+        }
+        return true;
+    } catch (e) {
+        console.warn("[DingTag] scrollSidebarToActiveTask error:", e?.message);
+    }
+    return false;
+}
+
+/**
+ * ตรวจจับว่า task ปัจจุบันอยู่ row บนสุดของ sidebar หรือไม่
+ */
+function isTaskAtTopOfList() {
+    const selectedRow = document.querySelector(".lsf-table__row-wrapper_selected");
+    if (!selectedRow) return false;
+    const rowTop = parseInt(selectedRow.style.top, 10);
+    // row แรกจะมี top ≈ 43 (header 42 + 1) หรือน้อยกว่า 113 (row ที่ 2)
+    return rowTop <= 50;
+}
+
+/**
  * เลื่อนไป task ถัดไปด้วย Shift+ArrowDown
  * 1) blur textarea/input ที่ค้างอยู่ (ถ้ามี)
  * 2) focus document.body เพื่อให้ shortcut handler รับ event ได้
  * 3) dispatch Shift+ArrowDown
+ * 4) scroll sidebar ให้ task ใหม่อยู่ในมุมมอง
+ * 5) ถ้า task เด้งกลับบนสุด → Shift+ArrowDown อีก 1 ครั้ง
  */
 async function goToNextTask({ runToken } = {}) {
     if (runToken != null && !isRunActive(runToken)) return false;
@@ -855,8 +969,33 @@ async function goToNextTask({ runToken } = {}) {
             document.body.focus();
         }
     } catch {}
+
+    const taskIdBefore = getCurrentTaskId();
+
     if (dispatchShiftArrowDown()) {
         console.log("⏭️ ส่ง Shift+ArrowDown เพื่อไป task ถัดไปแล้ว");
+        lastNavigatedTaskId = taskIdBefore;
+
+        setTimeout(() => {
+            scrollSidebarToActiveTask();
+
+            // Bounce detection: ถ้า task เด้งกลับบนสุดหลัง Shift+↓
+            if (isTaskAtTopOfList() && !bounceSkipInProgress) {
+                const taskIdAfter = getCurrentTaskId();
+                if (taskIdAfter && taskIdAfter !== taskIdBefore) {
+                    console.log(`⚡ ตรวจพบ task เด้งกลับบนสุด (${taskIdBefore} → ${taskIdAfter}) → Shift+↓ อีก 1 ครั้ง`);
+                    bounceSkipInProgress = true;
+                    setTimeout(() => {
+                        dispatchShiftArrowDown();
+                        setTimeout(() => {
+                            scrollSidebarToActiveTask();
+                            bounceSkipInProgress = false;
+                            console.log(`📜 bounce skip เสร็จ → task: ${getCurrentTaskId()}`);
+                        }, 500);
+                    }, 300);
+                }
+            }
+        }, 500);
         return true;
     }
     return false;
@@ -1208,6 +1347,63 @@ function findVerifiedHintButton() {
         }
     }
     return fallback;
+}
+
+/**
+ * คลิก radio "Optimized" (Review Result) ก่อนกด Verified
+ * โครงสร้าง: <input name="Optimized" class="ant-radio-input" type="radio">
+ * หรือ label/span ที่มีข้อความ "Optimized"
+ */
+async function clickOptimizedRadio({ tries = 5, intervalMs = 300, runToken } = {}) {
+    for (let i = 1; i <= tries; i++) {
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale" };
+        }
+        // Strategy 1: หา input[name="Optimized"] โดยตรง
+        let radio = document.querySelector('input.ant-radio-input[name="Optimized"]') ||
+                    document.querySelector('input[type="radio"][name="Optimized"]');
+        if (radio) {
+            try { radio.scrollIntoView?.({ block: "center" }); } catch {}
+            // คลิกที่ wrapper (.ant-radio) หรือ parent label เพื่อให้ Ant Design จัดการ state
+            const wrapper = radio.closest(".ant-radio-wrapper") ||
+                            radio.closest("label") ||
+                            radio.parentElement;
+            if (wrapper && wrapper !== radio) {
+                try {
+                    if (fireFullMouseClick(wrapper)) {
+                        console.log(`✅ คลิก Optimized สำเร็จ (wrapper, ${i}/${tries})`);
+                        return { ok: true };
+                    }
+                    wrapper.click();
+                    console.log(`✅ คลิก Optimized สำเร็จ (wrapper.click, ${i}/${tries})`);
+                    return { ok: true };
+                } catch {}
+            }
+            try {
+                radio.click();
+                console.log(`✅ คลิก Optimized สำเร็จ (radio.click, ${i}/${tries})`);
+                return { ok: true };
+            } catch {}
+        }
+
+        // Strategy 2: หา element ที่มีข้อความ "Optimized"
+        const btn = findClickableByContainsText(["optimized"]);
+        if (btn) {
+            try { btn.scrollIntoView?.({ block: "center" }); } catch {}
+            if (fireFullMouseClick(btn)) {
+                console.log(`✅ คลิก Optimized สำเร็จ (text match, ${i}/${tries})`);
+                return { ok: true };
+            }
+            try {
+                btn.click();
+                console.log(`✅ คลิก Optimized สำเร็จ (text.click, ${i}/${tries})`);
+                return { ok: true };
+            } catch {}
+        }
+        await delay(intervalMs);
+    }
+    console.warn("⚠️ ไม่พบ radio Optimized");
+    return { ok: false, reason: "not_found" };
 }
 
 /**
@@ -1750,15 +1946,27 @@ async function runInvalidNonTargetLanguageAcceptFlow(reasonText = "non-target la
  *  7) Shift+↓ ไป task ถัดไป
  */
 async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
-    console.log("🚩 Invalid flow: Esc → Verified → Physical click Update");
-    setStatus("Invalid — กด Esc แล้วเปลี่ยนเป็น Verified");
+    console.log("🚩 Invalid flow: Esc → Optimized → Verified → Physical click Update");
+    setStatus("Invalid — กด Esc แล้วเปลี่ยนเป็น Optimized → Verified");
 
     if (dispatchEscape()) {
-        console.log("⎋ Invalid→Verified: ส่ง Escape ก่อนคลิก Verified");
+        console.log("⎋ Invalid→Verified: ส่ง Escape ก่อนคลิก Optimized");
     }
     blurAnyActiveElement();
     await delay(400);
     if (!isRunActive(runToken)) return;
+
+    // กด Optimized ก่อน
+    const optRes = await clickOptimizedRadio({ tries: 5, intervalMs: 300, runToken });
+    if (optRes.reason === "stale") return;
+    if (!optRes.ok) {
+        console.warn("⚠️ Invalid→Verified: ไม่พบ radio Optimized — ข้ามไปกด Verified เลย");
+    } else {
+        console.log("✅ กด Optimized แล้ว — รอ 1 วิ ก่อนกด Verified");
+        setStatus("Invalid: กด Optimized แล้ว — รอ 1 วิ");
+        await delay(1000);
+        if (!isRunActive(runToken)) return;
+    }
 
     const verRes = await clickVerifiedButton({ tries: 8, intervalMs: 400, runToken });
     if (verRes.reason === "stale") return;
@@ -1903,17 +2111,62 @@ setInterval(() => {
 
             if (currentTaskId === lastProcessedTaskId) {
                 const now = Date.now();
+
+                // เริ่มจับเวลา stuck
+                if (stuckTaskId !== currentTaskId) {
+                    stuckTaskId = currentTaskId;
+                    stuckTaskDetectedAt = now;
+                }
+
+                const stuckDuration = now - stuckTaskDetectedAt;
+
+                if (stuckDuration >= stuckTaskTimeoutMs) {
+                    // หมดเวลารอ → บังคับ Shift+↓ ไป task ถัดไป
+                    console.log(
+                        `⏭️ task ${currentTaskId} ค้างเกิน ${(stuckTaskTimeoutMs / 1000).toFixed(1)} วิ → บังคับ Shift+↓`
+                    );
+                    setStatus(`task ${currentTaskId} ค้าง → บังคับไป task ถัดไป`);
+                    stuckTaskId = "";
+                    stuckTaskDetectedAt = 0;
+                    lastProcessedTaskId = "";
+                    isProcessing = true;
+                    (async () => {
+                        try {
+                            const sent = await goToNextTask({ runToken: null });
+                            if (sent) {
+                                console.log(`⏭️ stuck-skip: ส่ง Shift+↓ จาก task ${currentTaskId} แล้ว`);
+                            } else {
+                                console.warn(`⚠️ stuck-skip: ส่ง Shift+↓ ไม่สำเร็จ (task ${currentTaskId})`);
+                            }
+                            await delay(1000);
+                        } catch (e) {
+                            console.warn("[DingTag] stuck-skip error:", e?.name, e?.message);
+                        } finally {
+                            isProcessing = false;
+                        }
+                    })();
+                    return;
+                }
+
                 if (now - lastNoTargetLogAt > 5000) {
                     lastNoTargetLogAt = now;
-                    console.log(`⏳ ข้าม task เดิม: ${currentTaskId} (รอ task ใหม่)`);
-                    setStatus(`รอ task ใหม่ (ล่าสุด: ${currentTaskId})`);
+                    const remaining = Math.max(0, (stuckTaskTimeoutMs - stuckDuration) / 1000);
+                    console.log(`⏳ ข้าม task เดิม: ${currentTaskId} (รอ task ใหม่ — timeout อีก ${remaining.toFixed(1)} วิ)`);
+                    setStatus(`รอ task ใหม่ (${currentTaskId}) — timeout ${remaining.toFixed(1)} วิ`);
                 }
                 return;
+            }
+
+            // task เปลี่ยนแล้ว → reset stuck tracker
+            if (stuckTaskId) {
+                stuckTaskId = "";
+                stuckTaskDetectedAt = 0;
             }
 
             isProcessing = true;
             lastProcessedTaskId = currentTaskId;
             setStatus(`พบ target task ${currentTaskId} แล้ว กำลังทำงาน...`);
+            scrollSidebarToActiveTask();
 
             (async () => {
                 try {
