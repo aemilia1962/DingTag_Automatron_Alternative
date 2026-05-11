@@ -570,6 +570,157 @@ async function clickAntCheckboxByNameAndVerify(checkboxName, { tries = 12, inter
     return { ok: false, reason: "not_checked" };
 }
 
+/**
+ * ถ้ายังโฟกัสที่ textarea/input อยู่ Label Studio จะ disable ปุ่ม Update
+ * เพราะถือว่ายังพิมพ์อยู่ ดังนั้นต้อง blur ออกก่อน
+ */
+function blurActiveTextInput() {
+    try {
+        const active = document.activeElement;
+        if (!active || typeof active.blur !== "function") return false;
+        const tag = active.tagName;
+        const isEditable = active.isContentEditable;
+        if (tag === "TEXTAREA" || tag === "INPUT" || isEditable) {
+            active.blur();
+            return true;
+        }
+    } catch (e) {
+        console.warn("[DingTag] blurActiveTextInput error:", e?.name, e?.message);
+    }
+    return false;
+}
+
+/**
+ * Primary target: บรรทัด "Classification: Valid" — .lsf-annotation-items__result-item ที่ label คือ "Classification:"
+ */
+function findClassificationResultRow() {
+    const items = document.querySelectorAll(".lsf-annotation-items__result-item");
+    for (const item of items) {
+        const label = item.querySelector(".lsf-annotation-items__result-label");
+        if (!label || !label.textContent) continue;
+        if (label.textContent.includes("Classification")) return item;
+    }
+    return null;
+}
+
+/**
+ * Fallback target: .lsf-annotation-items__item — การ์ดทั้งใบ
+ * (มี class _interactive / _selected ตาม Label Studio)
+ */
+function findAnnotationCard() {
+    return (
+        document.querySelector(
+            ".lsf-annotation-items__item.lsf-annotation-items__item_interactive"
+        ) ||
+        document.querySelector(
+            ".lsf-annotation-items__item.lsf-annotation-items__item_selected"
+        ) ||
+        document.querySelector(".lsf-annotation-items__item")
+    );
+}
+
+function safeClickEl(el) {
+    if (!el) return false;
+    try {
+        el.scrollIntoView?.({ block: "center", inline: "center" });
+    } catch {}
+    try {
+        el.click();
+        return true;
+    } catch (e) {
+        console.warn("[DingTag] safeClickEl error:", e?.name, e?.message);
+        return false;
+    }
+}
+
+function refocusClassification() {
+    if (blurActiveTextInput()) {
+        console.log("👀 blur textarea/input ก่อน refocus Classification");
+    }
+    const row = findClassificationResultRow();
+    if (row && safeClickEl(row)) {
+        console.log("🖱️ refocus: คลิก .result-item (Classification: Valid)");
+        return true;
+    }
+    const card = findAnnotationCard();
+    if (card && safeClickEl(card)) {
+        console.log("🖱️ refocus: คลิก .lsf-annotation-items__item card");
+        return true;
+    }
+    return false;
+}
+
+function findSubmitUpdateButton() {
+    const candidates = document.querySelectorAll(
+        'button[name="submit"][aria-label="submit"]'
+    );
+    for (const btn of candidates) {
+        const text = (btn.innerText || btn.textContent || "").trim().toLowerCase();
+        if (text.includes("update")) return btn;
+    }
+    const buttons = document.querySelectorAll('button, [role="button"]');
+    for (const btn of buttons) {
+        const text = (btn.innerText || btn.textContent || "").trim();
+        if (text === "Update") return btn;
+    }
+    return null;
+}
+
+function isUpdateButtonClickable(btn) {
+    if (!btn) return false;
+    if (btn.disabled) return false;
+    if (btn.hasAttribute && btn.hasAttribute("disabled")) return false;
+    if (btn.getAttribute && btn.getAttribute("aria-disabled") === "true") return false;
+    return true;
+}
+
+/**
+ * ลำดับการทำงาน:
+ * 1) เช็คปุ่ม Update — ถ้ากดได้ (ไม่ disabled) ก็กดเลย จบ
+ * 2) ถ้า disabled => กด Classification เพื่อ refocus แล้ว delay 1 วิ
+ * 3) เช็ค Update อีกครั้ง (Try ครั้งที่ 2) — ถ้ายังกดไม่ได้ ข้ามเลย
+ */
+async function clickUpdateWithEnabledCheck({ runToken, maxTries = 2, retryDelayMs = 1000 } = {}) {
+    for (let i = 1; i <= maxTries; i++) {
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale" };
+        }
+
+        if (blurActiveTextInput()) {
+            console.log("👀 blur textarea/input ก่อนเช็คปุ่ม Update");
+        }
+
+        const btn = findSubmitUpdateButton();
+        if (isUpdateButtonClickable(btn)) {
+            try {
+                btn.scrollIntoView?.({ block: "center", inline: "center" });
+            } catch {}
+            try {
+                btn.click();
+                console.log(`✅ กดปุ่ม Update สำเร็จ (ครั้งที่ ${i}/${maxTries})`);
+                return { ok: true, reason: "clicked" };
+            } catch (e) {
+                console.warn("[DingTag] update click error:", e?.name, e?.message);
+            }
+        } else {
+            const why = !btn ? "ไม่เจอปุ่ม" : "ปุ่มยัง disabled";
+            console.warn(`⚠️ Update ${why} (ครั้งที่ ${i}/${maxTries})`);
+        }
+
+        if (i < maxTries) {
+            const refocused = refocusClassification();
+            if (refocused) {
+                console.log(`🖱️ refocus Classification (<em>Valid/Invalid</em>) เพื่อปลดล็อก Update — รอ ${retryDelayMs}ms`);
+            } else {
+                console.warn("⚠️ ไม่พบ Classification value element ตอนพยายามปลดล็อก Update");
+            }
+            await delay(retryDelayMs);
+        }
+    }
+    console.warn("❌ ปุ่ม Update ยัง disabled — ข้ามการกด Update");
+    return { ok: false, reason: "disabled_after_retries" };
+}
+
 async function clickPopupAndVerify(keywords, { tries = 6, intervalMs = 450, waitDisappearMs = 1800 } = {}) {
     // Goal: ensure the popup button is actually clicked and disappears.
     for (let i = 1; i <= tries; i++) {
@@ -674,21 +825,20 @@ async function runInvalidReasonAcceptFlow(
         await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
         if (!isRunActive(runToken)) return;
     }
-    const classRefocusInvalid =
-        forceClickByText(["Classification"]) ||
-        (await clickByContainsTextAndVerify(["classification"], { tries: 8, intervalMs: 300 })).ok;
-    if (classRefocusInvalid) {
-        console.log("🖱️ กด Classification ซ้ำก่อน Update (invalid flow) แล้ว");
+    const refocusInvalid = refocusClassification();
+    if (refocusInvalid) {
+        console.log("🖱️ refocus Classification (<em>) ก่อน Update (invalid flow) แล้ว");
     } else {
-        console.warn("⚠️ ไม่พบ Classification ตอนเตรียมกด Update (invalid flow)");
+        console.warn("⚠️ ไม่พบ Classification value element (invalid flow)");
     }
 
-    if (forceClickByText(["Update"]) || (await clickByContainsTextAndVerify(["update"], { tries: 10, intervalMs: 350 })).ok) {
-        console.log("✅ กด Update สำเร็จ");
+    const updRes = await clickUpdateWithEnabledCheck({ runToken, maxTries: 2, retryDelayMs: 1000 });
+    if (updRes.ok) {
         setStatus("Invalid flow: ส่งงานแล้ว");
+    } else if (updRes.reason === "stale") {
+        return;
     } else {
-        console.warn("⚠️ ไม่พบปุ่ม Update");
-        setStatus("Invalid flow: ไม่พบปุ่ม Update");
+        setStatus("Invalid flow: ข้าม Update (ปุ่มยัง disabled)");
     }
 }
 
@@ -801,18 +951,7 @@ setInterval(() => {
                     });
                     if (ta) {
                         ta.focus();
-                        console.log("📝 2. โฟกัสกล่องแล้ว กำลังหาปุ่ม Delete Spaces...");
-
-                        await delay(500);
-                        if (!isRunActive(runToken)) return;
-                        if (forceClickByText(["Delete Spaces"])) {
-                            console.log("🧹 2.5 เจอแล้ว! กดลบ Spaces ให้เรียบร้อย!");
-                            await delay(600);
-                            if (!isRunActive(runToken)) return;
-                            ta.focus();
-                        } else {
-                            console.log("⚠️ ไม่พบปุ่ม Delete Spaces...");
-                        }
+                        console.log("📝 2. โฟกัสกล่อง Annotation Result แล้ว");
 
                         setStatus("ถอดเสียง (Local API)...");
                         const audioBase64 = await fetchAudioAsBase64();
@@ -896,23 +1035,26 @@ setInterval(() => {
                     await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
                     if (!isRunActive(runToken)) return;
 
-                    const classRefocusMain =
-                        forceClickByText(["Classification"]) ||
-                        (await clickByContainsTextAndVerify(["classification"], { tries: 8, intervalMs: 300 })).ok;
-                    if (classRefocusMain) {
-                        console.log("🖱️ ก่อนส่งงาน: กด Classification ซ้ำแล้ว");
+                    const refocusMain = refocusClassification();
+                    if (refocusMain) {
+                        console.log("🖱️ ก่อนส่งงาน: refocus Classification (<em>) แล้ว");
                     } else {
-                        console.warn("⚠️ ก่อนส่งงาน: ไม่พบ Classification ให้กดซ้ำ");
+                        console.warn("⚠️ ก่อนส่งงาน: ไม่พบ Classification value element");
                     }
 
-                    console.log("🔍 กำลังหาปุ่ม Update...");
-                    if (forceClickByText(["Update"]) || (await clickByContainsTextAndVerify(["update"], { tries: 10, intervalMs: 350 })).ok) {
-                        console.log("✅ 4. กดปุ่ม Update สำเร็จ!");
-                    } else {
-                        console.log("❌ 4. หาปุ่ม Update ไม่เจอครับ");
-                        setStatus("หาปุ่ม Update ไม่เจอ");
+                    console.log("🔍 กำลังเช็คปุ่ม Update...");
+                    const updMainRes = await clickUpdateWithEnabledCheck({
+                        runToken,
+                        maxTries: 2,
+                        retryDelayMs: 1000,
+                    });
+                    if (!updMainRes.ok) {
+                        if (updMainRes.reason === "stale") return;
+                        console.log("❌ 4. ข้ามการกด Update (ปุ่มยัง disabled หลังลอง 2 ครั้ง)");
+                        setStatus("ข้าม Update: ปุ่มยัง disabled");
                         return;
                     }
+                    console.log("✅ 4. กดปุ่ม Update สำเร็จ!");
 
                     await delay(1500);
                     if (!isRunActive(runToken)) return;
