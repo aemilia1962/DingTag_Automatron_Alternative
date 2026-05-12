@@ -518,6 +518,20 @@ DEFAULT_FORMAL_MODEL = "openai/gpt-4o-mini"
 
 MODERATION_MODEL = "openai/gpt-4o-mini"
 
+# Hallucination guard: เมื่อ primary model ถอดเสียงแล้วเจอ "คำซ้ำผิดธรรมชาติ" (AI หลอน เช่น
+# "อืออืออือ..." วน 100+ รอบ, "เห้ยเห้ยเห้ย..." วน 30+ รอบ) → ลองใหม่กับ fallback model 1 ครั้ง
+# ถ้ายังหลอนอีก → ใช้ผลลัพธ์ล่าสุดและทำขั้นตอนต่อไปตามปกติ
+HALLUCINATION_FALLBACK_MODEL = "google/gemini-2.5-flash"
+# Thresholds สำหรับ flag "หลอน": ขึ้นกับความยาวของ "หน่วยที่ซ้ำ" (unit)
+HALLUCINATION_MAX_UNIT_LEN = 15      # unit ยาวเกินนี้ไม่ถือว่าเป็น repetition แล้ว
+HALLUCINATION_TINY_UNIT_MAX = 2      # unit 1-2 ตัวอักษร
+HALLUCINATION_TINY_REPS = 10         #   → flag เมื่อซ้ำ >= 10 รอบ
+HALLUCINATION_SHORT_UNIT_MAX = 6     # unit 3-6 ตัวอักษร
+HALLUCINATION_SHORT_REPS = 6         #   → flag เมื่อซ้ำ >= 6 รอบ
+HALLUCINATION_LONG_REPS = 4          # unit 7+ ตัว → flag เมื่อซ้ำ >= 4 รอบ
+HALLUCINATION_COVERAGE_RATIO = 0.25  # หรือช่วงซ้ำกินพื้นที่ >= 25% ของข้อความ
+HALLUCINATION_COVERAGE_MIN_RUN = 30  #   (และยาว >= 30 ตัวอักษร, ซ้ำ >= 3 รอบ)
+
 # Non-target QC: Latin letters vs Thai letters (rough "English share" of letters).
 DEFAULT_NON_TARGET_ENGLISH_RATIO = 0.60
 DEFAULT_NON_TARGET_GRAY_RATIO_LOW = 0.18
@@ -562,6 +576,86 @@ def collapse_overspaced_thai(text: str) -> str:
     thai = r"[\u0E00-\u0E7F]"
     out = re.sub(rf"(?<={thai})\s+(?={thai})", "", text)
     return re.sub(r" +", " ", out).strip()
+
+
+def find_longest_repeated_run(
+    text: str, max_unit_len: int = HALLUCINATION_MAX_UNIT_LEN
+) -> tuple[str, int, int]:
+    """หา 'หน่วยที่ซ้ำติดกัน' ซึ่งกินพื้นที่มากที่สุดในข้อความ
+
+    คืน (unit, reps, run_chars) — สตริงของหน่วยซ้ำ, จำนวนรอบ, ความยาวรวม
+    ตัวอย่าง:
+      "อืออืออือ"  → ("อือ", 3, 9)
+      "เห้ยเห้ย"   → ("เห้ย", 2, 8)
+      "abcdef"     → ("", 0, 0)
+    """
+    if not text:
+        return ("", 0, 0)
+    n = len(text)
+    best_unit = ""
+    best_reps = 0
+    best_run = 0
+    max_u = min(max_unit_len, n // 2)
+    for u in range(1, max_u + 1):
+        i = 0
+        while i + u <= n:
+            unit = text[i:i + u]
+            reps = 1
+            j = i + u
+            while j + u <= n and text[j:j + u] == unit:
+                reps += 1
+                j += u
+            if reps >= 2:
+                run = reps * u
+                if run > best_run:
+                    best_unit = unit
+                    best_reps = reps
+                    best_run = run
+                i = j
+            else:
+                i += 1
+    return (best_unit, best_reps, best_run)
+
+
+def is_hallucinated_repetition(text: str) -> tuple[bool, dict]:
+    """True ถ้าข้อความมีลักษณะ 'AI หลอน' = ซ้ำคำ/วลีเดิมยาวผิดธรรมชาติ
+
+    เกณฑ์ (ปรับได้จากค่าคงที่ HALLUCINATION_*):
+      - unit 1-2 ตัว: ซ้ำ >= HALLUCINATION_TINY_REPS (default 10)
+      - unit 3-6 ตัว: ซ้ำ >= HALLUCINATION_SHORT_REPS (default 6)
+      - unit 7+ ตัว: ซ้ำ >= HALLUCINATION_LONG_REPS (default 4)
+      - หรือช่วงซ้ำกิน >= HALLUCINATION_COVERAGE_RATIO ของข้อความ
+        + ยาว >= HALLUCINATION_COVERAGE_MIN_RUN ตัวอักษร + ซ้ำ >= 3 รอบ
+    """
+    info = {"unit": "", "reps": 0, "runChars": 0}
+    if not text:
+        return (False, info)
+    unit, reps, run = find_longest_repeated_run(text)
+    info = {"unit": unit, "reps": reps, "runChars": run}
+    if not unit or reps < 2:
+        return (False, info)
+    ul = len(unit)
+    if ul <= HALLUCINATION_TINY_UNIT_MAX and reps >= HALLUCINATION_TINY_REPS:
+        return (True, info)
+    if ul <= HALLUCINATION_SHORT_UNIT_MAX and reps >= HALLUCINATION_SHORT_REPS:
+        return (True, info)
+    if ul > HALLUCINATION_SHORT_UNIT_MAX and reps >= HALLUCINATION_LONG_REPS:
+        return (True, info)
+    if (
+        run >= HALLUCINATION_COVERAGE_MIN_RUN
+        and reps >= 3
+        and (run / len(text)) >= HALLUCINATION_COVERAGE_RATIO
+    ):
+        return (True, info)
+    return (False, info)
+
+
+def _clean_transcript_text(raw: str) -> str:
+    """Pipeline ทำความสะอาดผลลัพธ์จาก ASR — ใช้ร่วมกันใน hallucination guard"""
+    t = force_single_line(raw or "")
+    t = re.sub(r"[()]", "", t)
+    t = collapse_overspaced_thai(t)
+    return force_single_line(t)
 
 
 def transcribe_audio_with_retry(
@@ -899,6 +993,92 @@ class AITranscriberApp(AppUI, ctk.CTk):
         except Exception as e:
             print(f"❌ ไม่สามารถบันทึกการตั้งค่าได้: {e}")
 
+    def _transcribe_with_hallucination_guard(
+        self,
+        primary_model: str,
+        b64_clean: str,
+        prompt_rules: str,
+        *,
+        job_id: str | None = None,
+    ) -> tuple[str, dict]:
+        """ถอดเสียง + ตรวจคำซ้ำผิดธรรมชาติ ("AI หลอน")
+
+        Flow:
+          1) ถอดด้วย primary_model
+          2) ถ้าผลลัพธ์มีคำซ้ำเกินเกณฑ์ → ลองใหม่ด้วย HALLUCINATION_FALLBACK_MODEL
+          3) ถ้ายังหลอน หรือ fallback ว่าง/พัง → คืนผลลัพธ์ของ primary (ทำขั้นตอนต่อไป)
+
+        คืน (cleaned_text, hallucination_meta)
+        """
+        raw_primary = transcribe_audio_with_retry(client, primary_model, b64_clean, prompt_rules)
+        primary_text = _clean_transcript_text(raw_primary)
+        primary_hallu, primary_info = is_hallucinated_repetition(primary_text)
+
+        meta: dict[str, Any] = {
+            "primaryModel": primary_model,
+            "primaryHallucinated": bool(primary_hallu),
+            "retried": False,
+            "fallbackModel": "",
+            "retriedHallucinated": False,
+            "unit": (primary_info.get("unit") or "")[:30],
+            "reps": int(primary_info.get("reps", 0) or 0),
+            "runChars": int(primary_info.get("runChars", 0) or 0),
+            "textLen": len(primary_text),
+        }
+
+        # No hallucination, or primary already IS the fallback → ใช้เลย
+        if not primary_hallu or primary_model == HALLUCINATION_FALLBACK_MODEL:
+            return (primary_text, meta)
+
+        print(
+            f"[🌀] Hallucination detected | model={primary_model} "
+            f"unit='{meta['unit']}' reps={meta['reps']} run={meta['runChars']} "
+            f"textLen={meta['textLen']} → retry with {HALLUCINATION_FALLBACK_MODEL}"
+        )
+        if job_id:
+            _job_update(
+                job_id,
+                step="transcribe_retry",
+                message=f"คำซ้ำผิดปกติ — ลองใหม่ด้วย {HALLUCINATION_FALLBACK_MODEL}",
+            )
+
+        try:
+            raw_retry = transcribe_audio_with_retry(
+                client, HALLUCINATION_FALLBACK_MODEL, b64_clean, prompt_rules
+            )
+        except Exception as e:
+            print(f"[⚠️] Fallback model error: {e!r} — ใช้ผลลัพธ์ primary")
+            return (primary_text, meta)
+
+        retry_text = _clean_transcript_text(raw_retry)
+        meta["retried"] = True
+        meta["fallbackModel"] = HALLUCINATION_FALLBACK_MODEL
+
+        if not retry_text:
+            print("[⚠️] Fallback model คืนค่าว่าง — ใช้ผลลัพธ์ primary")
+            return (primary_text, meta)
+
+        retry_hallu, retry_info = is_hallucinated_repetition(retry_text)
+        meta["retriedHallucinated"] = bool(retry_hallu)
+        meta["retriedUnit"] = (retry_info.get("unit") or "")[:30]
+        meta["retriedReps"] = int(retry_info.get("reps", 0) or 0)
+        meta["retriedRunChars"] = int(retry_info.get("runChars", 0) or 0)
+        meta["retriedTextLen"] = len(retry_text)
+
+        if retry_hallu:
+            print(
+                f"[⚠️] Fallback ยังหลอนอีก | "
+                f"unit='{meta['retriedUnit']}' reps={meta['retriedReps']} "
+                f"run={meta['retriedRunChars']} — ใช้ผลลัพธ์ primary, ทำขั้นตอนต่อไป"
+            )
+            return (primary_text, meta)
+
+        print(
+            f"[✅] Fallback {HALLUCINATION_FALLBACK_MODEL} แก้ปัญหาคำซ้ำได้ "
+            f"({meta['textLen']} → {meta['retriedTextLen']} chars)"
+        )
+        return (retry_text, meta)
+
     def run_transcribe_chain(self, audio_b64: str) -> dict:
         with self._models_lock:
             audio_model = self.audio_model
@@ -920,23 +1100,25 @@ class AITranscriberApp(AppUI, ctk.CTk):
             DINGTALK_PROMPT
             + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
         )
-        raw_content = transcribe_audio_with_retry(
-            client, audio_model, b64_clean, prompt_rules
+        result_text, hallu_meta = self._transcribe_with_hallucination_guard(
+            audio_model, b64_clean, prompt_rules
         )
-        result_text = force_single_line(raw_content or "")
-        result_text = re.sub(r"[()]", "", result_text)
-        result_text = collapse_overspaced_thai(result_text)
-        result_text = force_single_line(result_text)
 
         if not result_text:
             return {
                 "status": "success",
                 "text": "",
                 "isSensitive": False,
-                "qc": {"isNonTarget": False, "englishRatio": 0.0, "nonTargetSource": "none"},
+                "qc": {
+                    "isNonTarget": False,
+                    "englishRatio": 0.0,
+                    "nonTargetSource": "none",
+                    "hallucination": hallu_meta,
+                },
             }
 
         qc = self._classify_non_target_qc(result_text)
+        qc["hallucination"] = hallu_meta
 
         max_out = min(8192, max(512, int(len(result_text) * 1.5) + 400))
         formatted_raw = chat_completion_with_retry(
@@ -1059,12 +1241,9 @@ class AITranscriberApp(AppUI, ctk.CTk):
 
         b64_clean = base64.b64encode(raw_bytes).decode("ascii")
         prompt_rules = DINGTALK_PROMPT + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
-        raw_content = transcribe_audio_with_retry(client, audio_model, b64_clean, prompt_rules)
-
-        result_text = force_single_line(raw_content or "")
-        result_text = re.sub(r"[()]", "", result_text)
-        result_text = collapse_overspaced_thai(result_text)
-        result_text = force_single_line(result_text)
+        result_text, hallu_meta = self._transcribe_with_hallucination_guard(
+            audio_model, b64_clean, prompt_rules
+        )
 
         if not result_text:
             _session_stats_record_transcribe(time.time() - t0)
@@ -1072,11 +1251,24 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 "status": "success",
                 "text": "",
                 "isSensitive": False,
-                "qc": {"isNonTarget": False, "englishRatio": 0.0, "nonTargetSource": "none"},
+                "qc": {
+                    "isNonTarget": False,
+                    "englishRatio": 0.0,
+                    "nonTargetSource": "none",
+                    "hallucination": hallu_meta,
+                },
             }
 
         is_sensitive = self._moderate_text(result_text)
         qc = self._classify_non_target_qc(result_text)
+        qc["hallucination"] = hallu_meta
+        if hallu_meta.get("retried"):
+            print(
+                "[API] Hallucination guard | "
+                f"primaryHallucinated={hallu_meta.get('primaryHallucinated')} "
+                f"retriedHallucinated={hallu_meta.get('retriedHallucinated')} "
+                f"fallback={hallu_meta.get('fallbackModel')}"
+            )
         if qc.get("isNonTarget"):
             src = qc.get("nonTargetSource") or ""
             base_reasons = {
@@ -1162,25 +1354,36 @@ class AITranscriberApp(AppUI, ctk.CTk):
 
             _job_update(job_id, step="transcribe", message="กำลังถอดเสียงเป็นข้อความ...")
             prompt_rules = DINGTALK_PROMPT + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
-            raw_content = transcribe_audio_with_retry(client, audio_model, b64_clean, prompt_rules)
-            result_text = force_single_line(raw_content or "")
-            result_text = re.sub(r"[()]", "", result_text)
-            result_text = collapse_overspaced_thai(result_text)
-            result_text = force_single_line(result_text)
-            _job_update(job_id, step="transcribed", message="ถอดเสียงเสร็จแล้ว", textLen=len(result_text))
+            result_text, hallu_meta = self._transcribe_with_hallucination_guard(
+                audio_model, b64_clean, prompt_rules, job_id=job_id
+            )
+            _job_update(
+                job_id,
+                step="transcribed",
+                message="ถอดเสียงเสร็จแล้ว"
+                + (" (retry with fallback model)" if hallu_meta.get("retried") else ""),
+                textLen=len(result_text),
+                hallucination=hallu_meta,
+            )
 
             if not result_text:
                 out = {
                     "status": "success",
                     "text": "",
                     "isSensitive": False,
-                    "qc": {"isNonTarget": False, "englishRatio": 0.0, "nonTargetSource": "none"},
+                    "qc": {
+                        "isNonTarget": False,
+                        "englishRatio": 0.0,
+                        "nonTargetSource": "none",
+                        "hallucination": hallu_meta,
+                    },
                 }
                 _job_update(job_id, status="success", step="done", message="เสร็จสิ้น (ไม่มีข้อความ)", finishedAt=time.time(), result=out, isSensitive=False)
                 _session_stats_record_transcribe(time.time() - t0)
                 return
 
             qc = self._classify_non_target_qc(result_text)
+            qc["hallucination"] = hallu_meta
 
             _job_update(job_id, step="format", message="กำลังจัดข้อความให้เป็นทางการ...")
             max_out = min(8192, max(512, int(len(result_text) * 1.5) + 400))

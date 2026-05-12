@@ -57,6 +57,9 @@ let duplicateLoopThreshold = Math.max(
     2,
     parseInt(localStorage.getItem("dingtag_duplicate_loop_threshold") || "2", 10) || 2
 );
+// เปิด/ปิด auto-reset task history เมื่อเจอ duplicate-loop
+// (เมื่อปิด → จะกด Shift+↑ ขึ้นต่อไปเรื่อยๆ แทนการ clear history + Shift+↓ ทะลุ loop)
+let autoResetHistoryEnabled = localStorage.getItem("dingtag_auto_reset_history_enabled") !== "0";
 // Map<taskId, number[]> — เก็บ timestamp ของแต่ละครั้งที่ "เจอเด้งกลับ" สำหรับ taskId นั้น
 const duplicateTaskEncounters = new Map();
 // ชื่อ user ที่จะเอามาใส่ในช่อง "Annotators / Does not contain / <user>" เมื่อกด Shift+↑
@@ -662,6 +665,43 @@ dupSkipSlider.addEventListener("input", (e) => {
     duplicateSkipDelayMs = Math.max(0, parseInt(e.target.value, 10) || 300);
     localStorage.setItem("dingtag_duplicate_skip_delay_ms", String(duplicateSkipDelayMs));
     updateLabels();
+});
+
+// Toggle: เปิด/ปิด Auto-Reset Task History เมื่อเจอ duplicate-loop
+// (ปิดอยู่ → bot จะกด Shift+↑ ขึ้นต่อไปเรื่อยๆ ไม่ล้างประวัติ/ไม่กด Shift+↓ ทะลุ loop)
+const autoResetRow = document.createElement("div");
+autoResetRow.style.display = "flex";
+autoResetRow.style.alignItems = "center";
+autoResetRow.style.justifyContent = "space-between";
+autoResetRow.style.gap = "8px";
+autoResetRow.style.marginTop = "8px";
+settingsContainer.appendChild(autoResetRow);
+
+const autoResetLabel = document.createElement("label");
+autoResetLabel.innerText = "🔁 Auto-Reset History on Loop";
+autoResetLabel.style.fontSize = "12px";
+autoResetLabel.style.cursor = "pointer";
+autoResetRow.appendChild(autoResetLabel);
+
+const autoResetInput = document.createElement("input");
+autoResetInput.type = "checkbox";
+autoResetInput.checked = autoResetHistoryEnabled;
+autoResetInput.style.cursor = "pointer";
+autoResetInput.title =
+    `เมื่อเจอ task เดิมเด้งกลับซ้ำ ≥ ${duplicateLoopThreshold} ครั้งใน ${(duplicateLoopWindowMs / 1000).toFixed(0)} วิ ` +
+    "→ ล้างประวัติ task ทั้งหมด แล้วกด Shift+↓ ทะลุออกจาก loop\n" +
+    "(ปิดอยู่ = ไม่ล้างประวัติ จะกด Shift+↑ ขึ้นต่อไปเรื่อยๆ)";
+autoResetRow.appendChild(autoResetInput);
+
+autoResetLabel.addEventListener("click", () => {
+    autoResetInput.checked = !autoResetInput.checked;
+    autoResetInput.dispatchEvent(new Event("change"));
+});
+
+autoResetInput.addEventListener("change", () => {
+    autoResetHistoryEnabled = autoResetInput.checked;
+    localStorage.setItem("dingtag_auto_reset_history_enabled", autoResetHistoryEnabled ? "1" : "0");
+    console.log("[DingTag] Auto-Reset History on Loop:", autoResetHistoryEnabled ? "ON" : "OFF");
 });
 
 // ---- ตั้งค่า Auto-Filter (Annotators / Does not contain / <user>) — hotkey Shift+↑ ----
@@ -3594,7 +3634,9 @@ setInterval(() => {
 
                     // ถ้าซ้ำเกิน threshold ภายใน window → loop จริง
                     // force clear task history ทั้งหมดเพื่อให้ bot เริ่มนับใหม่ แล้วกด Shift+↓ ทะลุออก
-                    if (encounterCount >= duplicateLoopThreshold) {
+                    // (เปิด/ปิดได้จาก toggle "Auto-Reset History on Loop" ใน settings —
+                    //  ถ้าปิด: จะ fall through ไปยัง Shift+↑ ปกติ ไม่ล้างประวัติ)
+                    if (autoResetHistoryEnabled && encounterCount >= duplicateLoopThreshold) {
                         const clearedCount = processedTaskIds.size;
                         processedTaskIds.clear();
                         duplicateTaskEncounters.clear();
@@ -3781,6 +3823,28 @@ setInterval(() => {
                         }
 
                         const qc = data.qc || {};
+
+                        // Hallucination guard log — ถ้า Python server ลอง fallback model มา ให้ผู้ใช้เห็นใน log/status
+                        const halu = qc.hallucination || {};
+                        if (halu.retried) {
+                            const fb = halu.fallbackModel || "fallback";
+                            if (halu.retriedHallucinated) {
+                                console.warn(
+                                    `[DingTag] 🌀 AI หลอนซ้ำ (unit='${halu.unit}'×${halu.reps}) — ลอง ${fb} แล้วยังหลอนอีก (unit='${halu.retriedUnit}'×${halu.retriedReps}) → ใช้ผลลัพธ์เดิม`
+                                );
+                                setStatus(`AI หลอน (ลอง ${fb} แล้วยังซ้ำ) — ใช้ผลลัพธ์เดิม`);
+                            } else {
+                                console.log(
+                                    `[DingTag] ✅ AI หลอน (unit='${halu.unit}'×${halu.reps}) → ${fb} แก้ได้ (${halu.textLen} → ${halu.retriedTextLen} chars)`
+                                );
+                                setStatus(`AI หลอน → ${fb} แก้แล้ว`);
+                            }
+                        } else if (halu.primaryHallucinated) {
+                            console.warn(
+                                `[DingTag] 🌀 AI หลอน (unit='${halu.unit}'×${halu.reps}) — แต่ primary คือ fallback อยู่แล้ว ข้าม retry`
+                            );
+                        }
+
                         if (nonTargetAutoInvalidEnabled && qc.isNonTarget === true) {
                             const warnParts = [
                                 "⚠️ QC Non-Target — englishRatio:",
