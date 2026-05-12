@@ -26,6 +26,7 @@ let lastNoTargetLogAt = 0;
 let runTokenCounter = 0;
 let activeRunToken = 0;
 let lastProcessedTaskId = "";
+const processedTaskIds = new Set();
 let lastSeenUrl = location.href;
 // ติดตาม task ใหม่ที่ยังไม่เจอ Classification — ใช้คำนวณว่าควร auto-skip เมื่อใด
 let noClassificationTaskId = "";
@@ -40,6 +41,11 @@ let stuckTaskTimeoutMs = Math.max(
 );
 let stuckTaskDetectedAt = 0;
 let stuckTaskId = "";
+// Duplicate skip delay: หน่วงก่อน Shift+↓ เมื่อเจอ task ที่เคยทำแล้ว
+let duplicateSkipDelayMs = Math.max(
+    0,
+    parseInt(localStorage.getItem("dingtag_duplicate_skip_delay_ms") || "300", 10) || 300
+);
 
 function clearAllTasks() {
     activeTimeouts.forEach(t => clearTimeout(t));
@@ -47,7 +53,8 @@ function clearAllTasks() {
     isProcessing = false;
     activeRunToken = 0;
     resetTaskGate("manual_stop");
-    console.log("🛑 Kill Switch: ยกเลิกการกระทำทั้งหมด!");
+    processedTaskIds.clear();
+    console.log("🛑 Kill Switch: ยกเลิกการกระทำทั้งหมด! (cleared processed history)");
 }
 
 function resetTaskGate(reason = "unknown") {
@@ -588,6 +595,50 @@ stuckTaskSlider.addEventListener("input", (e) => {
     updateLabels();
 });
 
+const dupSkipLabel = document.createElement("div");
+dupSkipLabel.style.color = "#ccc";
+dupSkipLabel.style.fontSize = "12px";
+dupSkipLabel.style.marginTop = "8px";
+settingsContainer.appendChild(dupSkipLabel);
+const dupSkipSlider = document.createElement("input");
+dupSkipSlider.type = "range";
+dupSkipSlider.min = "0";
+dupSkipSlider.max = "3000";
+dupSkipSlider.step = "100";
+dupSkipSlider.value = String(duplicateSkipDelayMs);
+dupSkipSlider.style.width = "100%";
+dupSkipSlider.title = "หน่วงก่อน Shift+↓ เมื่อเจอ task ซ้ำ (เด้งกลับ)";
+settingsContainer.appendChild(dupSkipSlider);
+
+dupSkipSlider.addEventListener("input", (e) => {
+    duplicateSkipDelayMs = Math.max(0, parseInt(e.target.value, 10) || 300);
+    localStorage.setItem("dingtag_duplicate_skip_delay_ms", String(duplicateSkipDelayMs));
+    updateLabels();
+});
+
+// ปุ่ม Clear History (ล้างประวัติ task ที่เคยทำ)
+const clearHistoryBtn = document.createElement("button");
+clearHistoryBtn.innerText = "🧹 Clear Task History";
+clearHistoryBtn.style.marginTop = "12px";
+clearHistoryBtn.style.width = "100%";
+clearHistoryBtn.style.padding = "6px";
+clearHistoryBtn.style.border = "1px solid #555";
+clearHistoryBtn.style.borderRadius = "4px";
+clearHistoryBtn.style.backgroundColor = "#2c3e50";
+clearHistoryBtn.style.color = "#ecf0f1";
+clearHistoryBtn.style.cursor = "pointer";
+clearHistoryBtn.style.fontSize = "12px";
+clearHistoryBtn.addEventListener("click", () => {
+    const count = processedTaskIds.size;
+    processedTaskIds.clear();
+    lastProcessedTaskId = "";
+    stuckTaskId = "";
+    stuckTaskDetectedAt = 0;
+    console.log(`🧹 ล้างประวัติ task ที่เคยทำ (${count} รายการ) — สามารถทำซ้ำได้อีก`);
+    setStatus(`ล้างประวัติแล้ว (${count} tasks) — พร้อมทำงานใหม่`);
+});
+settingsContainer.appendChild(clearHistoryBtn);
+
 panel.appendChild(settingsContainer);
 document.body.appendChild(panel);
 
@@ -600,6 +651,7 @@ function updateLabels() {
             : `🛡️ ก่อนกด Accept อย่างน้อย: ${(minElapsedBeforeAcceptMs / 1000).toFixed(0)} วิ (งานเร็วเกินจะรอให้ครบ)`;
     autoSkipTimeoutLabel.innerText = `⏭️ Auto-Skip timeout: ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ`;
     stuckTaskLabel.innerText = `🔄 Stuck Task timeout: ${(stuckTaskTimeoutMs / 1000).toFixed(0)} วิ`;
+    dupSkipLabel.innerText = `⏩ Duplicate Skip delay: ${duplicateSkipDelayMs} ms`;
 }
 updateLabels();
 
@@ -1407,6 +1459,59 @@ async function clickOptimizedRadio({ tries = 5, intervalMs = 300, runToken } = {
 }
 
 /**
+ * คลิก radio "Has Errors" (Review Result) 
+ * โครงสร้าง: <input name="Has Errors" class="ant-radio-input" type="radio">
+ */
+async function clickHasErrorsRadio({ tries = 5, intervalMs = 300, runToken } = {}) {
+    for (let i = 1; i <= tries; i++) {
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale" };
+        }
+        let radio = document.querySelector('input.ant-radio-input[name="Has Errors"]') ||
+                    document.querySelector('input[type="radio"][name="Has Errors"]');
+        if (radio) {
+            try { radio.scrollIntoView?.({ block: "center" }); } catch {}
+            const wrapper = radio.closest(".ant-radio-wrapper") ||
+                            radio.closest("label") ||
+                            radio.parentElement;
+            if (wrapper && wrapper !== radio) {
+                try {
+                    if (fireFullMouseClick(wrapper)) {
+                        console.log(`✅ คลิก Has Errors สำเร็จ (wrapper, ${i}/${tries})`);
+                        return { ok: true };
+                    }
+                    wrapper.click();
+                    console.log(`✅ คลิก Has Errors สำเร็จ (wrapper.click, ${i}/${tries})`);
+                    return { ok: true };
+                } catch {}
+            }
+            try {
+                radio.click();
+                console.log(`✅ คลิก Has Errors สำเร็จ (radio.click, ${i}/${tries})`);
+                return { ok: true };
+            } catch {}
+        }
+
+        const btn = findClickableByContainsText(["has errors", "has error"]);
+        if (btn) {
+            try { btn.scrollIntoView?.({ block: "center" }); } catch {}
+            if (fireFullMouseClick(btn)) {
+                console.log(`✅ คลิก Has Errors สำเร็จ (text match, ${i}/${tries})`);
+                return { ok: true };
+            }
+            try {
+                btn.click();
+                console.log(`✅ คลิก Has Errors สำเร็จ (text.click, ${i}/${tries})`);
+                return { ok: true };
+            } catch {}
+        }
+        await delay(intervalMs);
+    }
+    console.warn("⚠️ ไม่พบ radio Has Errors");
+    return { ok: false, reason: "not_found" };
+}
+
+/**
  * คลิกปุ่ม Verified แบบยืดหยุ่น:
  *  1) ลองหา .lsf-hint [w] แล้ว full-mouse-click parent (มี fallback เป็น .click())
  *  2) ถ้ายังไม่เจอ → findClickableByContainsText(["verified"])
@@ -1933,24 +2038,25 @@ async function runInvalidNonTargetLanguageAcceptFlow(reasonText = "non-target la
 }
 
 /**
- * Flow ใหม่: เจอ Classification = Invalid → กด Esc → คลิก Verified → ลาก Mouse ไปกด Update
+ * Flow ใหม่: เจอ Classification = Invalid → กด Esc → Optimized → Has Errors → กด Update
  * (แทนพฤติกรรมเดิมที่ Shift+↓ ข้ามทั้งงาน)
  *
  * ขั้นตอน:
  *  1) ส่ง Escape เพื่อปิด popup/dropdown ที่อาจค้างอยู่
- *  2) คลิกปุ่ม "Verified" (hotkey [w]) — full-mouse-click หรือ fallback ส่งคีย์ 'w'
- *  3) รอเวลาขั้นต่ำก่อน Accept ตามที่ตั้งไว้ (ถ้ามี)
- *  4) blur active element + Esc อีกครั้ง ก่อนกด Update
- *  5) Physical click ปุ่ม Update (เลื่อนเมาส์จริงผ่าน Python pyautogui)
- *  6) ตรวจ popup "Ignore & Submit" ถ้าโผล่ก็ปิดให้
- *  7) Shift+↓ ไป task ถัดไป
+ *  2) คลิก radio "Optimized" — รอ 1 วิ
+ *  3) คลิก radio "Has Errors"
+ *  4) รอเวลาขั้นต่ำก่อน Accept ตามที่ตั้งไว้ (ถ้ามี)
+ *  5) blur active element + Esc อีกครั้ง ก่อนกด Update
+ *  6) Physical click ปุ่ม Update (เลื่อนเมาส์จริงผ่าน Python pyautogui)
+ *  7) ตรวจ popup "Ignore & Submit" ถ้าโผล่ก็ปิดให้
+ *  8) Shift+↓ ไป task ถัดไป
  */
 async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
-    console.log("🚩 Invalid flow: Esc → Optimized → Verified → Physical click Update");
-    setStatus("Invalid — กด Esc แล้วเปลี่ยนเป็น Optimized → Verified");
+    console.log("🚩 Invalid flow: Esc → Optimized → Has Errors → Physical click Update");
+    setStatus("Invalid — กด Esc แล้วเปลี่ยนเป็น Optimized → Has Errors");
 
     if (dispatchEscape()) {
-        console.log("⎋ Invalid→Verified: ส่ง Escape ก่อนคลิก Optimized");
+        console.log("⎋ Invalid flow: ส่ง Escape ก่อนคลิก Optimized");
     }
     blurAnyActiveElement();
     await delay(400);
@@ -1960,32 +2066,29 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
     const optRes = await clickOptimizedRadio({ tries: 5, intervalMs: 300, runToken });
     if (optRes.reason === "stale") return;
     if (!optRes.ok) {
-        console.warn("⚠️ Invalid→Verified: ไม่พบ radio Optimized — ข้ามไปกด Verified เลย");
+        console.warn("⚠️ Invalid flow: ไม่พบ radio Optimized — ข้ามไปกด Has Errors เลย");
     } else {
-        console.log("✅ กด Optimized แล้ว — รอ 1 วิ ก่อนกด Verified");
+        console.log("✅ กด Optimized แล้ว — รอ 1 วิ ก่อนกด Has Errors");
         setStatus("Invalid: กด Optimized แล้ว — รอ 1 วิ");
         await delay(1000);
         if (!isRunActive(runToken)) return;
     }
 
-    const verRes = await clickVerifiedButton({ tries: 8, intervalMs: 400, runToken });
-    if (verRes.reason === "stale") return;
-    if (!verRes.ok) {
-        console.warn("⚠️ Invalid→Verified: ไม่พบปุ่ม Verified → Shift+↓ ข้าม");
-        setStatus("Invalid: ไม่พบ Verified → ไป task ถัดไป");
+    // กด Has Errors
+    const errRes = await clickHasErrorsRadio({ tries: 8, intervalMs: 400, runToken });
+    if (errRes.reason === "stale") return;
+    if (!errRes.ok) {
+        console.warn("⚠️ Invalid flow: ไม่พบ radio Has Errors → Shift+↓ ข้าม");
+        setStatus("Invalid: ไม่พบ Has Errors → ไป task ถัดไป");
         await delay(500);
         if (!isRunActive(runToken)) return;
         if (await goToNextTask({ runToken })) {
-            setStatus("Invalid: ส่ง Shift+↓ ไป task ถัดไปแล้ว (ไม่พบ Verified)");
+            setStatus("Invalid: ส่ง Shift+↓ ไป task ถัดไปแล้ว (ไม่พบ Has Errors)");
             await delay(600);
         }
         return;
     }
-    setStatus(
-        verRes.reason === "hotkey_w"
-            ? "Invalid → ส่งคีย์ 'w' (Verified) แล้ว"
-            : "Invalid → คลิก Verified แล้ว"
-    );
+    setStatus("Invalid → คลิก Has Errors แล้ว");
 
     await delay(700);
     if (!isRunActive(runToken)) return;
@@ -1996,10 +2099,10 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
     }
 
     if (blurAnyActiveElement()) {
-        console.log("👀 Invalid→Verified: blur active element ก่อนกด Update");
+        console.log("👀 Invalid flow: blur active element ก่อนกด Update");
     }
     if (dispatchEscape()) {
-        console.log("⎋ Invalid→Verified: ส่ง Escape ก่อนกด Update");
+        console.log("⎋ Invalid flow: ส่ง Escape ก่อนกด Update");
     }
     await delay(300);
     if (!isRunActive(runToken)) return;
@@ -2017,8 +2120,7 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
     if (updRes.reason === "stale") return;
 
     if (updRes.ok) {
-        setStatus("Invalid→Verified: ส่งงานแล้ว — รอให้ระบบบันทึก");
-        // หน่วงให้ Label Studio commit งาน / โหลด task ถัดไป เสร็จก่อน
+        setStatus("Invalid flow: ส่งงานแล้ว — รอให้ระบบบันทึก");
         await delay(1500);
         if (!isRunActive(runToken)) return;
 
@@ -2028,30 +2130,29 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
             waitDisappearMs: 2200,
         });
         if (pop.ok && pop.reason !== "not_found") {
-            console.log("✅ Invalid→Verified: popup ถูกกดและหายไปแล้ว");
+            console.log("✅ Invalid flow: popup ถูกกดและหายไปแล้ว");
         }
 
-        // หน่วงเพิ่มก่อนส่ง Shift+↓ ตามคำสั่งผู้ใช้ — "หลังจากกด Update ให้ดีเลก่อน"
         const postUpdateDelayMs = 2000;
         console.log(
-            `⏳ Invalid→Verified: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
+            `⏳ Invalid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
         );
         setStatus(
-            `Invalid→Verified: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`
+            `Invalid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`
         );
         await delay(postUpdateDelayMs);
         if (!isRunActive(runToken)) return;
         if (await goToNextTask({ runToken })) {
-            setStatus("Invalid→Verified: ส่ง Shift+↓ ไป task ถัดไปแล้ว");
+            setStatus("Invalid flow: ส่ง Shift+↓ ไป task ถัดไปแล้ว");
             await delay(600);
         }
     } else {
-        console.log("❌ Invalid→Verified: ปุ่ม Update ยัง disabled → Shift+↓");
-        setStatus("Invalid→Verified: ข้าม Update (disabled) → ไป task ถัดไป");
+        console.log("❌ Invalid flow: ปุ่ม Update ยัง disabled → Shift+↓");
+        setStatus("Invalid flow: ข้าม Update (disabled) → ไป task ถัดไป");
         await delay(500);
         if (!isRunActive(runToken)) return;
         if (await goToNextTask({ runToken })) {
-            setStatus("Invalid→Verified: ส่ง Shift+↓ แล้ว (ข้าม Update)");
+            setStatus("Invalid flow: ส่ง Shift+↓ แล้ว (ข้าม Update)");
             await delay(600);
         }
     }
@@ -2109,8 +2210,32 @@ setInterval(() => {
                 return;
             }
 
-            if (currentTaskId === lastProcessedTaskId) {
+            // เช็คว่า task นี้เคยทำแล้ว (ทั้ง lastProcessedTaskId และ Set ทั้งหมด)
+            if (currentTaskId === lastProcessedTaskId || processedTaskIds.has(currentTaskId)) {
                 const now = Date.now();
+
+                // ถ้าเด้งกลับมา task ที่เคยทำแล้ว (อยู่ใน Set) → Shift+↓ ข้ามทันที
+                if (processedTaskIds.has(currentTaskId) && currentTaskId !== lastProcessedTaskId) {
+                    console.log(`⏭️ task ${currentTaskId} เคยทำแล้ว (เด้งกลับ) → Shift+↓ ข้าม (delay ${duplicateSkipDelayMs}ms)`);
+                    setStatus(`task ${currentTaskId} เคยทำแล้ว → ข้ามไป task ถัดไป`);
+                    lastProcessedTaskId = currentTaskId;
+                    isProcessing = true;
+                    (async () => {
+                        try {
+                            await delay(duplicateSkipDelayMs);
+                            const sent = await goToNextTask({ runToken: null });
+                            if (sent) {
+                                console.log(`⏭️ duplicate-skip: ส่ง Shift+↓ จาก task ${currentTaskId} แล้ว`);
+                            }
+                            await delay(duplicateSkipDelayMs);
+                        } catch (e) {
+                            console.warn("[DingTag] duplicate-skip error:", e?.name, e?.message);
+                        } finally {
+                            isProcessing = false;
+                        }
+                    })();
+                    return;
+                }
 
                 // เริ่มจับเวลา stuck
                 if (stuckTaskId !== currentTaskId) {
@@ -2165,6 +2290,7 @@ setInterval(() => {
 
             isProcessing = true;
             lastProcessedTaskId = currentTaskId;
+            processedTaskIds.add(currentTaskId);
             setStatus(`พบ target task ${currentTaskId} แล้ว กำลังทำงาน...`);
             scrollSidebarToActiveTask();
 
@@ -2184,7 +2310,7 @@ setInterval(() => {
                     if (!isRunActive(runToken)) return;
 
                     if (classificationValue === "invalid") {
-                        console.log("⚡ Classification = Invalid -> Esc → Verified → Physical click Update");
+                        console.log("⚡ Classification = Invalid -> Esc → Optimized → Has Errors → Update");
                         await runInvalidToVerifiedFlow(runToken, cycleStartAt);
                         return;
                     }
