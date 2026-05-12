@@ -2482,6 +2482,34 @@ function findAnnotatorRow(rows) {
     return null;
 }
 
+/** หาว่ามี filter "Platform Acceptance Status" อยู่หรือยัง
+ *  ใช้ .lsf-filterLine DOM structure แทนการนับ trigger index
+ *  เพราะแถว 2+ มี conjunction trigger ("and") และ "Is empty" ไม่มี value trigger
+ */
+function findPlatformAcceptanceTriggers() {
+    const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const lines = document.querySelectorAll(".lsf-filterLine");
+    for (const line of lines) {
+        const fieldTrigger = line.querySelector('.lsf-field [data-slot="popover-trigger"]');
+        if (!fieldTrigger) continue;
+        const text = norm(getTriggerDisplayValue(fieldTrigger));
+        const dv = norm(getTriggerDataValue(fieldTrigger));
+        if (
+            text.includes("platform acceptance") ||
+            dv.includes("acceptance_result") ||
+            dv.includes("platform_acceptance")
+        ) {
+            const opTrigger = line.querySelector('.lsf-operation [data-slot="popover-trigger"]');
+            return {
+                filterLine: line,
+                columnTrigger: fieldTrigger,
+                operatorTrigger: opTrigger || null,
+            };
+        }
+    }
+    return null;
+}
+
 /** หา <button> ที่ innerText ตรงกับ needle (case-insensitive, normalized whitespace) */
 function findButtonByText(needles, { exact = false } = {}) {
     const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -2718,6 +2746,10 @@ async function applyMyAnnotatorFilter() {
             console.log("[Filter] Step 1: panel เปิดอยู่แล้ว — ข้าม");
         }
 
+        // ─────────── ตั้ง Platform Acceptance Status ก่อน (ไม่มี value → ไม่โดนกวน) ───────────
+        await applyPlatformAcceptanceFilter();
+        await delay(STEP_DELAY_MS);
+
         // ─────────── เช็คก่อน: filter Annotators ตั้งอยู่แล้วหรือยัง ───────────
         // (ตามที่ user สั่ง: ถ้ามีครบแล้วไม่ต้องทำซ้ำ / ถ้ามีแถวแต่ขาด field ใด → fix เฉพาะที่ขาด /
         //  ถ้าไม่มีแถวเลย → ไป Step 2 (Add Filter) ตามปกติ)
@@ -2821,53 +2853,74 @@ async function applyMyAnnotatorFilter() {
         );
         await delay(STEP_DELAY_MS);
 
-        // helper: ดึง trigger ของแถวใหม่ (column/operator/value) — แถวใหม่อยู่ "ล่างสุด" เสมอ
-        // (เพราะใหม่ถูก append เข้ารายการ)
-        const getNewRowTriggers = () => {
-            const all = getFilterRowTriggers();
-            // ถ้ามี trigger ≥ 3 ตัว → 3 ตัวสุดท้ายคือแถวใหม่
-            // ถ้าน้อยกว่า → คืน array ที่มีเท่าที่หาเจอ (caller จัดการเอง)
-            return all.slice(-3);
+        // helper: ดึง trigger จาก .lsf-filterLine ตัวสุดท้าย (ข้าม conjunction "and" trigger)
+        const getLastLineTriggers = () => {
+            const lines = document.querySelectorAll(".lsf-filterLine");
+            const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
+            if (!lastLine) return null;
+            return {
+                line: lastLine,
+                colTrigger: lastLine.querySelector('.lsf-field [data-slot="popover-trigger"]'),
+                opTrigger: lastLine.querySelector('.lsf-operation [data-slot="popover-trigger"]'),
+                valTrigger: lastLine.querySelector('.lsf-value [data-slot="popover-trigger"]'),
+            };
         };
 
         // ─────────── Step 3: เลือก column = Annotators (ในแถวล่างสุด) ───────────
-        // แถวใหม่ default เป็น "Audio (data)" — ต้องเปิด dropdown พิมพ์ "Annotators" แล้วเลือก
-        // (ใช้ type-and-choose เพราะ dropdown อาจ virtualized และมี search box)
-        let newRow = getNewRowTriggers();
-        if (newRow.length === 0) {
-            console.warn("[Filter] ไม่มี trigger เลยหลังเพิ่มแถว");
-            setStatus("Apply filter: ไม่เจอ trigger");
+        let lastRow = getLastLineTriggers();
+        if (!lastRow || !lastRow.colTrigger) {
+            console.warn("[Filter] ไม่เจอ column trigger ในแถวใหม่");
+            setStatus("Apply filter: ไม่เจอ column trigger");
             return false;
         }
-        let colTrigger = newRow[0]; // ตัวแรกของแถวใหม่ = column
+        let colTrigger = lastRow.colTrigger;
         console.log(
             `[Filter] Step 3/5: เปิด column dropdown แล้วเลือก "Annotators" ` +
                 `(ค่าปัจจุบัน: "${(colTrigger.innerText || "").replace(/\s+/g, " ").trim()}")`
         );
         setStatus("Filter 3/5: เลือก Annotators");
-        const colOk = await openSelectTypeAndChoose(colTrigger, "Annotators");
-        if (!colOk) {
-            // fallback: ลองแบบไม่พิมพ์ search (กรณี dropdown ไม่มี search input)
-            console.log("[Filter] type-and-choose ล้มเหลว → ลอง open-and-choose ตรง ๆ");
-            newRow = getNewRowTriggers();
-            colTrigger = newRow[0];
-            if (!(await openSelectAndChoose(colTrigger, "Annotators"))) {
-                console.warn("[Filter] เลือก Annotators ไม่สำเร็จ");
-                setStatus("Apply filter: เลือก Annotators ไม่ได้");
-                return false;
-            }
+
+        // เปิด dropdown แล้วหา option Annotators จาก data-testid โดยตรง
+        try { colTrigger.scrollIntoView?.({ block: "center" }); } catch {}
+        colTrigger.click();
+        await delay(400);
+
+        const ANNOTATOR_OPTION_SELECTOR =
+            '[data-testid="select-option-filter:tasks:annotators"], ' +
+            '[cmdk-item][data-value="filter:tasks:annotators"], ' +
+            '[role="option"][data-value="filter:tasks:annotators"]';
+
+        let annotatorOption = null;
+        const optStart = Date.now();
+        while (Date.now() - optStart < 4000) {
+            annotatorOption = document.querySelector(ANNOTATOR_OPTION_SELECTOR);
+            if (annotatorOption) break;
+            await delay(100);
         }
-        console.log("✅ [Filter] column = Annotators");
+        if (!annotatorOption) {
+            console.warn("[Filter] ไม่เจอ Annotators option ใน dropdown");
+            setStatus("Apply filter: เลือก Annotators ไม่ได้");
+            return false;
+        }
+        try { annotatorOption.scrollIntoView?.({ block: "center" }); } catch {}
+        await delay(100);
+        annotatorOption.click();
+        console.log("✅ [Filter] column = Annotators (คลิก option โดยตรง)");
         await delay(STEP_DELAY_MS);
 
         // ─────────── Step 4: เลือก operator = Does not contain ───────────
-        newRow = getNewRowTriggers();
-        if (newRow.length < 2) {
+        lastRow = getLastLineTriggers();
+        if (!lastRow || !lastRow.opTrigger) {
+            console.log("[Filter] ยังไม่เจอ operator trigger — รอ 500ms แล้วลองอีก");
+            await delay(500);
+            lastRow = getLastLineTriggers();
+        }
+        if (!lastRow || !lastRow.opTrigger) {
             console.warn("[Filter] หลังเลือก column ยังหา operator trigger ไม่เจอ");
             setStatus("Apply filter: ไม่เจอ operator trigger");
             return false;
         }
-        const opTrigger = newRow[1]; // ตัวที่ 2 ของแถวใหม่ = operator
+        const opTrigger = lastRow.opTrigger;
         console.log("[Filter] Step 4/5: เปิด operator dropdown แล้วเลือก \"Does not contain\"");
         setStatus("Filter 4/5: เลือก Does not contain");
         const opOk = await openSelectAndChoose(opTrigger, "Does not contain");
@@ -2880,13 +2933,18 @@ async function applyMyAnnotatorFilter() {
         await delay(STEP_DELAY_MS);
 
         // ─────────── Step 5: พิมพ์ user แล้วเลือก option ───────────
-        newRow = getNewRowTriggers();
-        if (newRow.length < 3) {
+        lastRow = getLastLineTriggers();
+        if (!lastRow || !lastRow.valTrigger) {
+            console.log("[Filter] ยังไม่เจอ value trigger — รอ 500ms แล้วลองอีก");
+            await delay(500);
+            lastRow = getLastLineTriggers();
+        }
+        if (!lastRow || !lastRow.valTrigger) {
             console.warn("[Filter] หลังเลือก operator ยังหา value trigger ไม่เจอ");
             setStatus("Apply filter: ไม่เจอ value trigger");
             return false;
         }
-        const valTrigger = newRow[2]; // ตัวที่ 3 = value
+        const valTrigger = lastRow.valTrigger;
         console.log(`[Filter] Step 5/6: พิมพ์และเลือก "${username}"`);
         setStatus(`Filter 5/6: เลือก ${username}`);
         const valOk = await openSelectTypeAndChoose(valTrigger, username);
@@ -2912,6 +2970,268 @@ async function applyMyAnnotatorFilter() {
         return false;
     } finally {
         filterApplyInFlight = false;
+    }
+}
+
+/**
+ * ตั้ง filter "Platform Acceptance Status / Is empty"
+ *
+ * ใช้ .lsf-filterLine DOM structure จับ trigger ตรง ๆ ผ่าน .lsf-field / .lsf-operation
+ * แทนการนับ index เพราะแถว 2+ มี conjunction trigger ("and") ปนอยู่
+ * และ "Is empty" ไม่มี value trigger
+ */
+async function applyPlatformAcceptanceFilter() {
+    const STEP_DELAY_MS = 600;
+    const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    /** กด Escape เพื่อปิด popover/dropdown ที่ค้างอยู่ */
+    const dismissPopovers = () => {
+        const target = document.activeElement || document.body;
+        if (!target) return;
+        try {
+            target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, bubbles: true, cancelable: true }));
+            target.dispatchEvent(new KeyboardEvent("keyup",   { key: "Escape", code: "Escape", keyCode: 27, bubbles: true, cancelable: true }));
+        } catch {}
+    };
+
+    /** ดึง column/operator trigger จาก .lsf-filterLine ตัวสุดท้าย */
+    const getLastLineTriggers = () => {
+        const lines = document.querySelectorAll(".lsf-filterLine");
+        const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
+        if (!lastLine) return null;
+        return {
+            line: lastLine,
+            colTrigger: lastLine.querySelector('.lsf-field [data-slot="popover-trigger"]'),
+            opTrigger: lastLine.querySelector('.lsf-operation [data-slot="popover-trigger"]'),
+        };
+    };
+
+    /** เช็คว่า filter panel (.lsf-filters) มีอยู่ใน DOM หรือไม่ */
+    const isFilterPanelVisible = () => !!document.querySelector(".lsf-filters");
+
+    /** เปิด filter panel ถ้ายังปิดอยู่ */
+    const ensureFilterPanelOpen = async () => {
+        if (isFilterPanelVisible()) {
+            console.log("[Filter-PAS] filter panel เปิดอยู่แล้ว (.lsf-filters เจอ)");
+            return true;
+        }
+        const filterBtn = document.querySelector('button[aria-label="Filters"]');
+        if (!filterBtn) {
+            console.warn("[Filter-PAS] ไม่พบปุ่ม Filters เลย");
+            return false;
+        }
+        console.log("[Filter-PAS] filter panel ปิดอยู่ — คลิก Filters เพื่อเปิด");
+        try { filterBtn.scrollIntoView?.({ block: "center" }); } catch {}
+        filterBtn.click();
+        await delay(800);
+        if (isFilterPanelVisible()) return true;
+        console.warn("[Filter-PAS] คลิก Filters แล้วแต่ .lsf-filters ยังไม่โผล่");
+        return false;
+    };
+
+    try {
+        console.log("🔧 [Filter-PAS] เริ่มตั้งค่า Platform Acceptance Status / Is empty");
+
+        // ─── Step 0: ปิด popover ที่ค้างอยู่ + เปิด filter panel ───
+        dismissPopovers();
+        await delay(300);
+
+        if (!(await ensureFilterPanelOpen())) {
+            setStatus("Filter-PAS: เปิด filter panel ไม่ได้");
+            return false;
+        }
+
+        // ─── Step 1: เช็คว่ามี Platform Acceptance Status filter อยู่แล้วหรือยัง ───
+        const existingPAS = findPlatformAcceptanceTriggers();
+        if (existingPAS) {
+            const opTrigger = existingPAS.operatorTrigger;
+            if (opTrigger) {
+                const opText = norm(getTriggerDisplayValue(opTrigger));
+                if (opText === "is empty" || opText.includes("is empty")) {
+                    console.log("✅ [Filter-PAS] Platform Acceptance Status / Is empty — มีอยู่แล้ว");
+                    setStatus("Filter: Platform Acceptance Status ✓");
+                    return true;
+                }
+                console.log(`[Filter-PAS] fix operator: "${opText}" → "Is empty"`);
+                setStatus("Filter-PAS: fix operator → Is empty");
+                const ok = await openSelectAndChoose(opTrigger, "Is empty");
+                if (!ok) {
+                    console.warn("[Filter-PAS] เลือก Is empty ไม่สำเร็จ");
+                    setStatus("Filter-PAS: เลือก Is empty ไม่ได้");
+                    return false;
+                }
+                await delay(STEP_DELAY_MS);
+                console.log("✅ [Filter-PAS] fix operator สำเร็จ");
+                setStatus("Filter-PAS: Is empty ✓");
+                return true;
+            }
+        }
+
+        // ─── Step 2: คลิก "Add Another Filter" ───
+        console.log("[Filter-PAS] ไม่เจอแถว Platform Acceptance Status — จะ Add Filter แถวใหม่");
+        setStatus("Filter-PAS: กด Add Another Filter...");
+
+        const linesBefore = document.querySelectorAll(".lsf-filterLine").length;
+        console.log(`[Filter-PAS] จำนวนแถวก่อนกด = ${linesBefore}`);
+
+        let addBtn = findButtonByText(
+            ["Add Another Filter", "Add Filter", "Add filter", "Add Another", "Add another"],
+            { exact: false }
+        );
+        if (!addBtn) {
+            await delay(800);
+            addBtn = findButtonByText(
+                ["Add Another Filter", "Add Filter", "Add filter", "Add Another", "Add another"],
+                { exact: false }
+            );
+        }
+        if (!addBtn) {
+            console.warn("[Filter-PAS] ไม่พบปุ่ม Add Another Filter");
+            setStatus("Filter-PAS: ไม่พบปุ่ม Add Another Filter");
+            return false;
+        }
+        console.log(`[Filter-PAS] กดปุ่ม "${(addBtn.innerText || "").replace(/\s+/g, " ").trim()}"`);
+        try { addBtn.scrollIntoView?.({ block: "center" }); } catch {}
+        addBtn.click();
+
+        // รอ .lsf-filterLine ใหม่โผล่
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < 5000) {
+            if (document.querySelectorAll(".lsf-filterLine").length > linesBefore) break;
+            await delay(100);
+        }
+        const linesNow = document.querySelectorAll(".lsf-filterLine").length;
+        if (linesNow <= linesBefore) {
+            console.warn(`[Filter-PAS] รอแถวใหม่ไม่ทัน (ยังมี ${linesNow} แถว)`);
+            setStatus("Filter-PAS: แถวใหม่ไม่โผล่");
+            return false;
+        }
+        console.log(`[Filter-PAS] แถวใหม่โผล่แล้ว (${linesBefore} → ${linesNow})`);
+        await delay(STEP_DELAY_MS);
+
+        // ─── helper: รอจนกว่าจะเจอ element ตาม selector ใน DOM ───
+        const waitForElement = async (selector, timeoutMs = 4000) => {
+            const start = Date.now();
+            while (Date.now() - start < timeoutMs) {
+                const el = document.querySelector(selector);
+                if (el) return el;
+                await delay(100);
+            }
+            return null;
+        };
+
+        // ─── Step 3: เลือก column = Platform Acceptance Status (ในแถวล่างสุด) ───
+        let last = getLastLineTriggers();
+        if (!last || !last.colTrigger) {
+            console.warn("[Filter-PAS] ไม่เจอ column trigger ในแถวใหม่");
+            setStatus("Filter-PAS: ไม่เจอ column trigger");
+            return false;
+        }
+        const colCurrentText = (last.colTrigger.innerText || "").replace(/\s+/g, " ").trim();
+        console.log(`[Filter-PAS] Step 3: เลือก column (ค่าปัจจุบัน: "${colCurrentText}")`);
+        setStatus("Filter-PAS: เลือก Platform Acceptance Status");
+
+        // คลิก column trigger เพื่อเปิด cmdk dropdown
+        try { last.colTrigger.scrollIntoView?.({ block: "center" }); } catch {}
+        last.colTrigger.click();
+        console.log("[Filter-PAS] คลิก column trigger แล้ว — รอ cmdk dropdown");
+        await delay(400);
+
+        // รอ option "Platform Acceptance Status" โผล่ใน DOM (cmdk render เป็น [cmdk-item] / [role="option"])
+        const PAS_OPTION_SELECTOR =
+            '[data-testid="select-option-filter:tasks:acceptance_result"], ' +
+            '[cmdk-item][data-value="filter:tasks:acceptance_result"], ' +
+            '[role="option"][data-value="filter:tasks:acceptance_result"]';
+
+        let pasOption = await waitForElement(PAS_OPTION_SELECTOR, 4000);
+        if (!pasOption) {
+            // retry: ปิด popover แล้วเปิดใหม่
+            console.log("[Filter-PAS] ไม่เจอ PAS option — ลองคลิก column trigger อีกครั้ง");
+            dismissPopovers();
+            await delay(300);
+            last = getLastLineTriggers();
+            if (last?.colTrigger) {
+                last.colTrigger.click();
+                await delay(500);
+                pasOption = await waitForElement(PAS_OPTION_SELECTOR, 4000);
+            }
+        }
+        if (!pasOption) {
+            console.warn("[Filter-PAS] เลือก Platform Acceptance Status ไม่สำเร็จ — ไม่เจอ option ใน DOM");
+            setStatus("Filter-PAS: ไม่เจอ Platform Acceptance Status ใน dropdown");
+            dismissPopovers();
+            return false;
+        }
+
+        // scroll ให้เห็น แล้วคลิก
+        try { pasOption.scrollIntoView?.({ block: "center" }); } catch {}
+        await delay(100);
+        pasOption.click();
+        console.log("✅ [Filter-PAS] column = Platform Acceptance Status (คลิก option โดยตรง)");
+        await delay(STEP_DELAY_MS);
+
+        // ─── Step 4: เลือก operator = Is empty (ในแถวล่างสุด) ───
+        // re-query เพราะ DOM re-render หลังเลือก column
+        last = getLastLineTriggers();
+        if (!last || !last.opTrigger) {
+            console.log("[Filter-PAS] ยังไม่เจอ operator trigger — รอ 600ms แล้วลองอีก");
+            await delay(600);
+            last = getLastLineTriggers();
+        }
+        if (!last || !last.opTrigger) {
+            console.warn("[Filter-PAS] หลังเลือก column ยังหา operator trigger ไม่เจอ");
+            setStatus("Filter-PAS: ไม่เจอ operator trigger");
+            return false;
+        }
+        const opCurrentText = (last.opTrigger.innerText || "").replace(/\s+/g, " ").trim();
+        console.log(`[Filter-PAS] Step 4: เลือก operator (ค่าปัจจุบัน: "${opCurrentText}")`);
+        setStatus("Filter-PAS: เลือก Is empty");
+
+        // คลิก operator trigger เพื่อเปิด dropdown
+        try { last.opTrigger.scrollIntoView?.({ block: "center" }); } catch {}
+        last.opTrigger.click();
+        console.log("[Filter-PAS] คลิก operator trigger แล้ว — รอ option");
+        await delay(400);
+
+        // หา "Is empty" option โดยตรงจาก data-value / data-testid
+        const EMPTY_OPTION_SELECTOR =
+            '[data-testid="select-option-empty"], ' +
+            '[cmdk-item][data-value="empty"], ' +
+            '[role="option"][data-value="empty"]';
+
+        let emptyOption = await waitForElement(EMPTY_OPTION_SELECTOR, 4000);
+        if (!emptyOption) {
+            // fallback: ลอง openSelectAndChoose ด้วย text matching
+            console.log("[Filter-PAS] ไม่เจอ Is empty option จาก selector — ลอง text matching");
+            last = getLastLineTriggers();
+            if (last?.opTrigger) {
+                const opOk = await openSelectAndChoose(last.opTrigger, "Is empty");
+                if (opOk) {
+                    console.log("✅ [Filter-PAS] operator = Is empty (text matching fallback)");
+                    await delay(300);
+                    console.log("✅ [Filter-PAS] เสร็จ! Platform Acceptance Status / Is empty");
+                    setStatus("Filter-PAS: Platform Acceptance Status / Is empty ✓");
+                    return true;
+                }
+            }
+            console.warn("[Filter-PAS] เลือก Is empty ไม่สำเร็จ");
+            setStatus("Filter-PAS: เลือก Is empty ไม่ได้");
+            return false;
+        }
+
+        try { emptyOption.scrollIntoView?.({ block: "center" }); } catch {}
+        await delay(100);
+        emptyOption.click();
+        console.log("✅ [Filter-PAS] operator = Is empty (คลิก option โดยตรง)");
+        await delay(300);
+
+        console.log("✅ [Filter-PAS] เสร็จ! Platform Acceptance Status / Is empty");
+        setStatus("Filter-PAS: Platform Acceptance Status / Is empty ✓");
+        return true;
+    } catch (e) {
+        console.warn("[Filter-PAS] applyPlatformAcceptanceFilter error:", e?.name, e?.message, e);
+        setStatus("Filter-PAS: error — " + (e?.message || "unknown"));
+        return false;
     }
 }
 
