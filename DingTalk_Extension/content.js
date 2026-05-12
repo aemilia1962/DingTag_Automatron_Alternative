@@ -46,6 +46,19 @@ let duplicateSkipDelayMs = Math.max(
     0,
     parseInt(localStorage.getItem("dingtag_duplicate_skip_delay_ms") || "300", 10) || 300
 );
+// Duplicate-loop breaker: ถ้า task เดิมถูกตรวจเจอ (แบบเด้งกลับ) เกิน threshold ครั้ง
+// ภายในหน้าต่างเลื่อนนี้ → บังคับใช้ Shift+↓ แทน Shift+↑ เพื่อตัด loop ที่ Shift+↑ วนกลับมาตัวเดิม
+// (default: 3 ครั้งใน 120,000 ms = 2 นาที)
+let duplicateLoopWindowMs = Math.max(
+    10000,
+    parseInt(localStorage.getItem("dingtag_duplicate_loop_window_ms") || "120000", 10) || 120000
+);
+let duplicateLoopThreshold = Math.max(
+    2,
+    parseInt(localStorage.getItem("dingtag_duplicate_loop_threshold") || "3", 10) || 3
+);
+// Map<taskId, number[]> — เก็บ timestamp ของแต่ละครั้งที่ "เจอเด้งกลับ" สำหรับ taskId นั้น
+const duplicateTaskEncounters = new Map();
 // ชื่อ user ที่จะเอามาใส่ในช่อง "Annotators / Does not contain / <user>" เมื่อกด Shift+↑
 // (เก็บไว้ใน localStorage เพื่อให้แต่ละเครื่องตั้งค่าของตัวเอง)
 let filterAnnotatorUsername =
@@ -68,6 +81,7 @@ function clearAllTasks() {
     activeRunToken = 0;
     resetTaskGate("manual_stop");
     processedTaskIds.clear();
+    duplicateTaskEncounters.clear();
     // รีเซ็ต auto-filter idle tracker (จะเริ่มนับใหม่เมื่อ bot ON อีกครั้ง)
     noTargetIdleSince = 0;
     lastAutoFilterAt = 0;
@@ -83,6 +97,23 @@ function resetTaskGate(reason = "unknown") {
         noClassificationTaskId = "";
         noClassificationStartedAt = 0;
     }
+}
+
+/**
+ * บันทึก encounter ของ task ซ้ำ (เด้งกลับ) แล้วคืนจำนวนครั้งที่เกิดขึ้นภายในหน้าต่าง duplicateLoopWindowMs
+ *
+ * ใช้สำหรับตรวจจับ loop ที่ task เดิมถูกเด้งกลับมาหลายรอบใน 2 นาที (default)
+ * — เมื่อค่ากลับ >= duplicateLoopThreshold หมายความว่า Shift+↑ ก็พา loop วนกลับมาที่เดิม
+ *   ต้อง override เป็น Shift+↓ เพื่อทะลุออกจาก loop
+ */
+function recordDuplicateEncounter(taskId) {
+    if (!taskId) return 0;
+    const now = Date.now();
+    let timestamps = duplicateTaskEncounters.get(taskId) || [];
+    timestamps = timestamps.filter((ts) => now - ts <= duplicateLoopWindowMs);
+    timestamps.push(now);
+    duplicateTaskEncounters.set(taskId, timestamps);
+    return timestamps.length;
 }
 
 function setTextareaValueAndNotify(ta, value) {
@@ -762,6 +793,7 @@ clearHistoryBtn.style.fontSize = "12px";
 clearHistoryBtn.addEventListener("click", () => {
     const count = processedTaskIds.size;
     processedTaskIds.clear();
+    duplicateTaskEncounters.clear();
     lastProcessedTaskId = "";
     stuckTaskId = "";
     stuckTaskDetectedAt = 0;
@@ -1985,6 +2017,198 @@ async function clickUpdateWithEnabledCheck({
     return { ok: false, reason: "disabled_after_retries" };
 }
 
+/**
+ * ตรวจหา "Quality Check Failed" popup (lsf-modal-dm) หลังกด Update — ถ้าเจอให้ปิดให้เรียบร้อย
+ * โดยคลิก "Ignore & Submit" (data-testid=dialog-ok-button) ก่อนจะส่ง Shift+↓ ไป task ถัดไป
+ *
+ * DOM โครงสร้างที่รู้:
+ *   <div class="lsf-modal-dm__content">
+ *     <div class="lsf-modal-dm__header">
+ *       <div class="lsf-modal-dm__title">Quality Check Failed</div>
+ *     </div>
+ *     <div class="lsf-modal-dm__body">Annotation has N error(s)...</div>
+ *     <div class="lsf-modal-dm__footer">
+ *       <button data-testid="dialog-cancel-button" aria-label="Cancel">Go Back & Fix</button>
+ *       <button data-testid="dialog-ok-button" aria-label="Ignore & Submit">Ignore & Submit</button>
+ *     </div>
+ *   </div>
+ *
+ * พฤติกรรม:
+ *  1) Poll หา .lsf-modal-dm__title ที่มีข้อความ "Quality Check Failed" ในหน้าต่างเวลา detectTimeoutMs
+ *  2) ไม่เจอจริงๆ → return { found: false } (caller ส่ง Shift+↓ ได้ทันที)
+ *  3) เจอ → คลิก dialog-ok-button (Ignore & Submit) → รอ popup หาย
+ *  4) คลิกไม่ติด → fallback Escape
+ *
+ * หมายเหตุ: เราเลือกคลิก "Ignore & Submit" (ไม่ใช่ "Go Back & Fix") เพราะ:
+ *  - Auto-pilot ต้องการ commit งานแล้วเดินต่อ
+ *  - สอดคล้องกับ clickPopupAndVerify(["Ignore & Submit"], ...) เดิมในโค้ด
+ *  - "Go Back & Fix" จะค้างที่ task เดิมแบบไม่มี classification ทำให้ stuck
+ *
+ * @param {object} opts
+ *   - runToken: ใช้เช็คว่า run ยัง active อยู่
+ *   - detectTimeoutMs: เวลา poll หา popup (default 1500ms)
+ *   - closeTimeoutMs: เวลารอ popup ปิดสนิทหลังคลิก (default 3000ms)
+ * @returns {Promise<{ found: boolean, closed: boolean }>}
+ */
+async function closeQualityCheckFailedIfPresent({
+    runToken,
+    detectTimeoutMs = 1500,
+    closeTimeoutMs = 3000,
+} = {}) {
+    if (runToken != null && !isRunActive(runToken)) return { found: false, closed: false };
+
+    const QCF_REGEX = /quality\s*check\s*failed/i;
+
+    // หา QCF modal: title element + container
+    const findQcfModal = () => {
+        // (a) primary: ใช้ class .lsf-modal-dm__title ที่มี text "Quality Check Failed"
+        const titles = document.querySelectorAll(".lsf-modal-dm__title");
+        for (const titleEl of titles) {
+            const t = (titleEl.textContent || "").trim();
+            if (QCF_REGEX.test(t)) {
+                const container =
+                    titleEl.closest(".lsf-modal-dm__content") ||
+                    titleEl.closest('[role="dialog"], [role="alertdialog"]') ||
+                    titleEl.parentElement;
+                return container || titleEl;
+            }
+        }
+        // (b) fallback: เผื่อ class เปลี่ยน — หา text "Quality Check Failed" ใน node สั้นๆ ทั่วหน้า
+        const candidates = document.querySelectorAll(
+            'div, span, h1, h2, h3, h4, h5, p, [role="dialog"], [role="alertdialog"]'
+        );
+        for (const el of candidates) {
+            const raw = (el.textContent || "").trim();
+            if (!raw || raw.length > 200) continue;
+            if (QCF_REGEX.test(raw)) {
+                const container =
+                    el.closest(".lsf-modal-dm__content") ||
+                    el.closest('[role="dialog"], [role="alertdialog"]') ||
+                    el;
+                return container;
+            }
+        }
+        return null;
+    };
+
+    // หา "Ignore & Submit" button ใน modal (ตามลำดับความน่าเชื่อถือ)
+    const findIgnoreSubmitBtn = (modal) => {
+        if (!modal) return null;
+        const selectors = [
+            '[data-testid="dialog-ok-button"]',
+            'button[aria-label="Ignore & Submit"]',
+            'button[aria-label*="Ignore" i]',
+        ];
+        for (const sel of selectors) {
+            try {
+                const btn = modal.querySelector(sel);
+                if (btn && !btn.disabled && btn.offsetParent !== null) return btn;
+            } catch {}
+        }
+        // text fallback: ปุ่มที่ text มีคำว่า ignore + submit
+        const buttons = modal.querySelectorAll('button, [role="button"]');
+        for (const btn of buttons) {
+            const t = (btn.innerText || btn.textContent || "").trim().toLowerCase();
+            if (t === "ignore & submit" || (t.includes("ignore") && t.includes("submit"))) {
+                return btn;
+            }
+        }
+        return null;
+    };
+
+    const sendEscape = () => {
+        const target = document.body || document.documentElement;
+        if (!target) return false;
+        const opts = {
+            key: "Escape",
+            code: "Escape",
+            keyCode: 27,
+            which: 27,
+            bubbles: true,
+            cancelable: true,
+        };
+        try {
+            target.dispatchEvent(new KeyboardEvent("keydown", opts));
+            target.dispatchEvent(new KeyboardEvent("keyup", opts));
+            return true;
+        } catch {
+            return false;
+        }
+    };
+
+    // (1) Poll หา QCF modal
+    const detectStart = Date.now();
+    let modal = findQcfModal();
+    while (!modal && Date.now() - detectStart < detectTimeoutMs) {
+        await delay(150);
+        if (runToken != null && !isRunActive(runToken)) return { found: false, closed: false };
+        modal = findQcfModal();
+    }
+
+    if (!modal) {
+        console.log("🔍 Quality Check Failed: ไม่เจอ popup — พร้อมส่ง Shift+↓ ได้เลย");
+        return { found: false, closed: false };
+    }
+
+    console.warn("⚠️ ตรวจพบ Quality Check Failed — กำลังคลิก 'Ignore & Submit'");
+    setStatus("พบ Quality Check Failed — คลิก Ignore & Submit");
+
+    // (2) คลิก Ignore & Submit
+    const btn = findIgnoreSubmitBtn(modal);
+    if (btn) {
+        try {
+            btn.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+        try {
+            console.log("🖱️ คลิก 'Ignore & Submit' ใน Quality Check Failed");
+            btn.click();
+            const parentBtn = btn.closest?.('button, [role="button"]');
+            if (parentBtn && parentBtn !== btn) parentBtn.click();
+        } catch (e) {
+            console.warn("[DingTag] คลิก Ignore & Submit ล้มเหลว:", e?.name, e?.message);
+        }
+    } else {
+        console.warn(
+            "⚠️ ไม่พบปุ่ม 'Ignore & Submit' ใน QCF modal — ใช้ Escape แทน (อาจปิดไม่ลง)"
+        );
+        sendEscape();
+    }
+
+    // (3) รอ popup หาย
+    const closeStart = Date.now();
+    while (Date.now() - closeStart < closeTimeoutMs) {
+        await delay(200);
+        if (runToken != null && !isRunActive(runToken)) return { found: true, closed: false };
+        if (!findQcfModal()) {
+            console.log("✅ Quality Check Failed ปิดสำเร็จ (Ignore & Submit)");
+            setStatus("Quality Check Failed: Ignore & Submit แล้ว — เตรียมไป task ถัดไป");
+            return { found: true, closed: true };
+        }
+    }
+
+    // (4) ปิดไม่ลง → ลองคลิก Ignore & Submit อีกครั้ง + Escape fallback
+    console.warn("⚠️ Quality Check Failed ยังไม่หายหลังหมดเวลา — ลอง click ซ้ำ + Escape");
+    const btnRetry = findIgnoreSubmitBtn(findQcfModal());
+    if (btnRetry) {
+        try {
+            btnRetry.click();
+        } catch {}
+    }
+    await delay(400);
+    sendEscape();
+    await delay(500);
+
+    const stillThere = !!findQcfModal();
+    if (!stillThere) {
+        console.log("✅ Quality Check Failed ปิดได้หลัง retry");
+        setStatus("Quality Check Failed ปิดแล้ว — เตรียมไป task ถัดไป");
+    } else {
+        console.warn("⚠️ Quality Check Failed ยังค้าง — ส่ง Shift+↓ ต่อ (อาจถูก block)");
+        setStatus("Quality Check Failed ยังค้างอยู่ — ส่ง Shift+↓ ต่อ");
+    }
+    return { found: true, closed: !stillThere };
+}
+
 async function clickPopupAndVerify(keywords, { tries = 6, intervalMs = 450, waitDisappearMs = 1800 } = {}) {
     // Goal: ensure the popup button is actually clicked and disappears.
     for (let i = 1; i <= tries; i++) {
@@ -2175,6 +2399,9 @@ async function runInvalidReasonAcceptFlow(
         // หน่วง 2 วิ หลัง Update เหมือน Valid/Verified flows
         await delay(2000);
         if (runToken != null && !isRunActive(runToken)) return;
+        // เช็ค + ปิด Quality Check Failed popup (ถ้ามี) ก่อนเลื่อนไป task ถัดไป
+        await closeQualityCheckFailedIfPresent({ runToken });
+        if (runToken != null && !isRunActive(runToken)) return;
         if (await goToNextTask({ runToken })) {
             setStatus("Invalid flow: ส่ง Shift+↓ ไป task ถัดไปแล้ว");
             await delay(600);
@@ -2331,6 +2558,9 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
             `Invalid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`
         );
         await delay(postUpdateDelayMs);
+        if (!isRunActive(runToken)) return;
+        // เช็ค + ปิด Quality Check Failed popup (ถ้ามี) ก่อนเลื่อนไป task ถัดไป
+        await closeQualityCheckFailedIfPresent({ runToken });
         if (!isRunActive(runToken)) return;
         if (await goToNextTask({ runToken })) {
             setStatus("Invalid flow: ส่ง Shift+↓ ไป task ถัดไปแล้ว");
@@ -3358,8 +3588,55 @@ setInterval(() => {
                 // (เปลี่ยนจาก Shift+↓ → Shift+↑ ตามคำขอ user: เจอ task ซ้ำให้กลับขึ้นไป
                 //  แทนที่จะลงไปต่อ เพราะลงไปต่อก็เป็น task ที่เคยทำแล้วเช่นกัน)
                 if (processedTaskIds.has(currentTaskId) && currentTaskId !== lastProcessedTaskId) {
-                    console.log(`⏮️ task ${currentTaskId} เคยทำแล้ว (เด้งกลับ) → Shift+↑ กลับขึ้น (delay ${duplicateSkipDelayMs}ms)`);
-                    setStatus(`task ${currentTaskId} เคยทำแล้ว → Shift+↑ กลับขึ้น`);
+                    // นับว่า task นี้เด้งกลับมาเป็นครั้งที่เท่าไหร่ในหน้าต่าง duplicateLoopWindowMs
+                    const encounterCount = recordDuplicateEncounter(currentTaskId);
+                    const windowSec = (duplicateLoopWindowMs / 1000).toFixed(0);
+
+                    // ถ้าซ้ำเกิน threshold ภายใน window → loop จริง: Shift+↑ พาวนกลับมาที่เดิม
+                    // ต้อง override เป็น Shift+↓ เพื่อทะลุออกจาก loop
+                    if (encounterCount >= duplicateLoopThreshold) {
+                        console.log(
+                            `🔁 task ${currentTaskId} เด้งกลับซ้ำ ${encounterCount} รอบใน ${windowSec} วิ → break loop ด้วย Shift+↓ (delay ${duplicateSkipDelayMs}ms)`
+                        );
+                        setStatus(
+                            `task ${currentTaskId} ซ้ำ ${encounterCount}/${duplicateLoopThreshold} รอบใน ${windowSec} วิ → Shift+↓ break loop`
+                        );
+                        duplicateTaskEncounters.delete(currentTaskId);
+                        lastProcessedTaskId = currentTaskId;
+                        isProcessing = true;
+                        (async () => {
+                            try {
+                                await delay(duplicateSkipDelayMs);
+                                const sent = await goToNextTask({ runToken: null });
+                                if (sent) {
+                                    console.log(
+                                        `⏭️ duplicate-loop break: ส่ง Shift+↓ จาก task ${currentTaskId} แล้ว`
+                                    );
+                                } else {
+                                    console.warn(
+                                        `⚠️ duplicate-loop break: ส่ง Shift+↓ ไม่สำเร็จ (task ${currentTaskId})`
+                                    );
+                                }
+                                await delay(duplicateSkipDelayMs);
+                            } catch (e) {
+                                console.warn(
+                                    "[DingTag] duplicate-loop break error:",
+                                    e?.name,
+                                    e?.message
+                                );
+                            } finally {
+                                isProcessing = false;
+                            }
+                        })();
+                        return;
+                    }
+
+                    console.log(
+                        `⏮️ task ${currentTaskId} เคยทำแล้ว (เด้งกลับ, รอบ ${encounterCount}/${duplicateLoopThreshold} ใน ${windowSec} วิ) → Shift+↑ กลับขึ้น (delay ${duplicateSkipDelayMs}ms)`
+                    );
+                    setStatus(
+                        `task ${currentTaskId} เคยทำแล้ว (${encounterCount}/${duplicateLoopThreshold}) → Shift+↑ กลับขึ้น`
+                    );
                     lastProcessedTaskId = currentTaskId;
                     isProcessing = true;
                     (async () => {
@@ -3636,6 +3913,9 @@ setInterval(() => {
                         `Valid: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`
                     );
                     await delay(postUpdateDelayMs);
+                    if (!isRunActive(runToken)) return;
+                    // เช็ค + ปิด Quality Check Failed popup (ถ้ามี) ก่อนเลื่อนไป task ถัดไป
+                    await closeQualityCheckFailedIfPresent({ runToken });
                     if (!isRunActive(runToken)) return;
                     if (await goToNextTask({ runToken })) {
                         setStatus("ส่ง Shift+↓ ไป task ถัดไปแล้ว");
