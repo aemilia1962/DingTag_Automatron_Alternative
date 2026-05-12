@@ -46,6 +46,20 @@ let duplicateSkipDelayMs = Math.max(
     0,
     parseInt(localStorage.getItem("dingtag_duplicate_skip_delay_ms") || "300", 10) || 300
 );
+// ชื่อ user ที่จะเอามาใส่ในช่อง "Annotators / Does not contain / <user>" เมื่อกด Shift+↑
+// (เก็บไว้ใน localStorage เพื่อให้แต่ละเครื่องตั้งค่าของตัวเอง)
+let filterAnnotatorUsername =
+    (localStorage.getItem("dingtag_filter_annotator_username") || "Thai-1-Nuntawut").trim() ||
+    "Thai-1-Nuntawut";
+// เปิด/ปิดฟีเจอร์ Auto-Filter ทั้งหมด (hotkey Shift+↑ + ปุ่ม Apply + auto-trigger)
+let autoFilterEnabled = localStorage.getItem("dingtag_auto_filter_enabled") !== "0";
+let filterApplyInFlight = false;
+// Auto-trigger: เมื่อ BOT ทำงานอยู่ + ไม่เจอ target task นาน → apply filter อัตโนมัติ
+// (ผูกกับ isAutoPilotOn — bot OFF จะไม่ trigger เพราะ polling loop ไม่เข้าเงื่อนไข)
+let noTargetIdleSince = 0;     // timestamp เริ่มเห็น "ไม่เจอ target" ครั้งล่าสุด
+let lastAutoFilterAt = 0;       // timestamp ครั้งล่าสุดที่ auto-filter ถูก trigger (cooldown)
+const NO_TARGET_AUTO_FILTER_AFTER_MS = 4000;  // ต้องไม่เจอ target ติดต่อกัน 4 วิ ก่อน trigger
+const AUTO_FILTER_COOLDOWN_MS = 30000;        // 30 วิ ระหว่าง trigger แต่ละครั้ง (กัน loop)
 
 function clearAllTasks() {
     activeTimeouts.forEach(t => clearTimeout(t));
@@ -54,6 +68,9 @@ function clearAllTasks() {
     activeRunToken = 0;
     resetTaskGate("manual_stop");
     processedTaskIds.clear();
+    // รีเซ็ต auto-filter idle tracker (จะเริ่มนับใหม่เมื่อ bot ON อีกครั้ง)
+    noTargetIdleSince = 0;
+    lastAutoFilterAt = 0;
     console.log("🛑 Kill Switch: ยกเลิกการกระทำทั้งหมด! (cleared processed history)");
 }
 
@@ -616,6 +633,120 @@ dupSkipSlider.addEventListener("input", (e) => {
     updateLabels();
 });
 
+// ---- ตั้งค่า Auto-Filter (Annotators / Does not contain / <user>) — hotkey Shift+↑ ----
+// Toggle: เปิด/ปิด ฟีเจอร์ทั้งหมด
+const filterToggleRow = document.createElement("div");
+filterToggleRow.style.display = "flex";
+filterToggleRow.style.alignItems = "center";
+filterToggleRow.style.justifyContent = "space-between";
+filterToggleRow.style.gap = "8px";
+filterToggleRow.style.marginTop = "12px";
+settingsContainer.appendChild(filterToggleRow);
+
+const filterToggleLabel = document.createElement("label");
+filterToggleLabel.innerText = "🚫 Auto-Filter (Shift+↑)";
+filterToggleLabel.style.fontSize = "12px";
+filterToggleLabel.style.cursor = "pointer";
+filterToggleRow.appendChild(filterToggleLabel);
+
+const filterToggleInput = document.createElement("input");
+filterToggleInput.type = "checkbox";
+filterToggleInput.checked = autoFilterEnabled;
+filterToggleInput.style.cursor = "pointer";
+filterToggleInput.title = "เปิด/ปิด ฟีเจอร์ตั้ง Filter อัตโนมัติ (hotkey Shift+↑ + ปุ่ม Apply)";
+filterToggleRow.appendChild(filterToggleInput);
+
+filterToggleLabel.addEventListener("click", () => {
+    filterToggleInput.checked = !filterToggleInput.checked;
+    filterToggleInput.dispatchEvent(new Event("change"));
+});
+
+filterToggleInput.addEventListener("change", () => {
+    autoFilterEnabled = filterToggleInput.checked;
+    localStorage.setItem("dingtag_auto_filter_enabled", autoFilterEnabled ? "1" : "0");
+    console.log("[DingTag] Auto-Filter:", autoFilterEnabled ? "ON" : "OFF");
+    updateApplyFilterBtnState();
+});
+
+const filterUserLabel = document.createElement("div");
+filterUserLabel.style.fontSize = "12px";
+filterUserLabel.style.marginTop = "8px";
+filterUserLabel.innerText = "🚫 Filter exclude annotator:";
+settingsContainer.appendChild(filterUserLabel);
+
+const filterUserInput = document.createElement("input");
+filterUserInput.type = "text";
+filterUserInput.value = filterAnnotatorUsername;
+filterUserInput.placeholder = "Thai-1-Nuntawut";
+filterUserInput.style.width = "100%";
+filterUserInput.style.boxSizing = "border-box";
+filterUserInput.style.marginTop = "4px";
+filterUserInput.style.padding = "5px 7px";
+filterUserInput.style.border = "1px solid #555";
+filterUserInput.style.borderRadius = "4px";
+filterUserInput.style.background = "#1b1f22";
+filterUserInput.style.color = "#ecf0f1";
+filterUserInput.style.fontSize = "12px";
+filterUserInput.title =
+    "ชื่อ user ที่จะใส่ในช่อง 'Annotators / Does not contain / <user>' เมื่อกด Shift+↑ หรือกดปุ่ม Apply ด้านล่าง";
+settingsContainer.appendChild(filterUserInput);
+
+filterUserInput.addEventListener("change", () => {
+    const v = (filterUserInput.value || "").trim();
+    filterAnnotatorUsername = v || "Thai-1-Nuntawut";
+    filterUserInput.value = filterAnnotatorUsername;
+    localStorage.setItem("dingtag_filter_annotator_username", filterAnnotatorUsername);
+    console.log("[DingTag] Filter exclude annotator =", filterAnnotatorUsername);
+});
+
+const applyFilterBtn = document.createElement("button");
+applyFilterBtn.type = "button";
+applyFilterBtn.innerText = "🚫 Apply My Filter (Shift+↑)";
+applyFilterBtn.style.marginTop = "6px";
+applyFilterBtn.style.width = "100%";
+applyFilterBtn.style.padding = "6px";
+applyFilterBtn.style.border = "1px solid #555";
+applyFilterBtn.style.borderRadius = "4px";
+applyFilterBtn.style.backgroundColor = "#2c3e50";
+applyFilterBtn.style.color = "#ecf0f1";
+applyFilterBtn.style.cursor = "pointer";
+applyFilterBtn.style.fontSize = "12px";
+applyFilterBtn.title =
+    "เปิด Filter panel แล้วตั้ง Annotators / Does not contain / <user ในช่องด้านบน>";
+applyFilterBtn.addEventListener("click", () => {
+    applyMyAnnotatorFilter().catch((e) => {
+        console.warn("[DingTag] Apply filter error:", e?.name, e?.message);
+    });
+});
+settingsContainer.appendChild(applyFilterBtn);
+
+// ตรวจว่าปุ่ม Filters มีอยู่บนหน้านี้หรือไม่ (หน้า Tasks list จะมี ส่วนหน้าอื่นไม่มี)
+function isFilterButtonPresent() {
+    return !!document.querySelector('button[aria-label="Filters"]');
+}
+
+// อัปเดตสภาพ apply button + input ให้ตรงกับ toggle + การมีอยู่ของ Filters button
+function updateApplyFilterBtnState() {
+    const hasFilter = isFilterButtonPresent();
+    const enabled = autoFilterEnabled && hasFilter;
+    applyFilterBtn.disabled = !enabled;
+    applyFilterBtn.style.opacity = enabled ? "1" : "0.45";
+    applyFilterBtn.style.cursor = enabled ? "pointer" : "not-allowed";
+    filterUserInput.disabled = !autoFilterEnabled;
+    filterUserInput.style.opacity = autoFilterEnabled ? "1" : "0.55";
+    if (!autoFilterEnabled) {
+        applyFilterBtn.title = "ปิดอยู่ — เปิด Auto-Filter toggle ด้านบนก่อน";
+    } else if (!hasFilter) {
+        applyFilterBtn.title = "ยังไม่เจอปุ่ม Filters บนหน้านี้ — เปิดหน้า Tasks list ก่อน";
+    } else {
+        applyFilterBtn.title =
+            "เปิด Filter panel แล้วเพิ่มแถวใหม่ Annotators / Does not contain / <user>";
+    }
+}
+// initial state + poll ทุก 1.5 วิ (Filters button อาจ render หลัง navigate)
+updateApplyFilterBtnState();
+setInterval(updateApplyFilterBtnState, 1500);
+
 // ปุ่ม Clear History (ล้างประวัติ task ที่เคยทำ)
 const clearHistoryBtn = document.createElement("button");
 clearHistoryBtn.innerText = "🧹 Clear Task History";
@@ -924,6 +1055,32 @@ function dispatchShiftArrowDown() {
 }
 
 /**
+ * ส่ง Shift+ArrowUp ไปยัง document.body เพื่อเลื่อนกลับ task ก่อนหน้า
+ * (shortcut ของ Label Studio — ใช้ตอนเจอ task ซ้ำที่เคยทำแล้ว เพื่อกลับขึ้นไปหา task ใหม่)
+ */
+function dispatchShiftArrowUp() {
+    const target = document.body || document.documentElement;
+    if (!target) return false;
+    const opts = {
+        key: "ArrowUp",
+        code: "ArrowUp",
+        keyCode: 38,
+        which: 38,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+    };
+    try {
+        target.dispatchEvent(new KeyboardEvent("keydown", opts));
+        target.dispatchEvent(new KeyboardEvent("keyup", opts));
+        return true;
+    } catch (e) {
+        console.warn("[DingTag] dispatchShiftArrowUp error:", e?.name, e?.message);
+        return false;
+    }
+}
+
+/**
  * Scroll sidebar (virtualized task list) ให้ row ที่ selected อยู่ในมุมมอง
  *
  * โครงสร้าง DOM ของ DingTag sidebar:
@@ -1047,6 +1204,39 @@ async function goToNextTask({ runToken } = {}) {
                     }, 300);
                 }
             }
+        }, 500);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * เลื่อนกลับไป task ก่อนหน้าด้วย Shift+ArrowUp
+ * 1) blur textarea/input ที่ค้างอยู่ (ถ้ามี)
+ * 2) focus document.body เพื่อให้ shortcut handler รับ event ได้
+ * 3) dispatch Shift+ArrowUp
+ * 4) scroll sidebar ให้ task ใหม่อยู่ในมุมมอง
+ *
+ * ใช้ตอนเจอ task ที่เคยทำแล้ว (เด้งกลับ) — กลับขึ้นไปหา task ใหม่แทนที่จะลงไปต่อ
+ */
+async function goToPreviousTask({ runToken } = {}) {
+    if (runToken != null && !isRunActive(runToken)) return false;
+    if (blurActiveTextInput()) {
+        console.log("👀 blur textarea/input ก่อนส่ง Shift+ArrowUp");
+    }
+    try {
+        if (document.body && typeof document.body.focus === "function") {
+            document.body.focus();
+        }
+    } catch {}
+
+    const taskIdBefore = getCurrentTaskId();
+
+    if (dispatchShiftArrowUp()) {
+        console.log("⏮️ ส่ง Shift+ArrowUp เพื่อกลับ task ก่อนหน้าแล้ว");
+        lastNavigatedTaskId = taskIdBefore;
+        setTimeout(() => {
+            scrollSidebarToActiveTask();
         }, 500);
         return true;
     }
@@ -2164,6 +2354,636 @@ function getCurrentTaskId() {
     return (el.textContent || "").trim();
 }
 
+// ===========================================================================
+// Auto-Filter: ตั้งค่า "Annotators / Does not contain / <user>" ใน Filter panel
+// เรียกผ่านปุ่ม Apply ในแผงตั้งค่า หรือ hotkey Shift+↑
+// ===========================================================================
+
+/** ส่ง Enter (keydown + keypress + keyup) ไปที่ active element หรือ document.body
+ *  ใช้ปิด popover หลังเลือก option และยืนยันค่าใน filter
+ */
+function dispatchEnterKey() {
+    const target = document.activeElement || document.body || document.documentElement;
+    if (!target) return false;
+    const opts = {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true,
+    };
+    try {
+        target.dispatchEvent(new KeyboardEvent("keydown", opts));
+        target.dispatchEvent(new KeyboardEvent("keypress", opts));
+        target.dispatchEvent(new KeyboardEvent("keyup", opts));
+        console.log(`⌨️ [Filter] dispatch Enter → ${target.tagName}${target.id ? "#" + target.id : ""}`);
+        return true;
+    } catch (e) {
+        console.warn("[DingTag] dispatchEnterKey error:", e?.name, e?.message);
+        return false;
+    }
+}
+
+/** Native setter เพื่อให้ React/Vue ฯลฯ "เห็น" การเปลี่ยนค่า input/textarea */
+function setNativeInputValue(el, value) {
+    if (!el) return false;
+    const proto =
+        el.tagName === "TEXTAREA"
+            ? window.HTMLTextAreaElement.prototype
+            : window.HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    try {
+        if (desc && desc.set) {
+            desc.set.call(el, value);
+        } else {
+            el.value = value;
+        }
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+    } catch (e) {
+        console.warn("[DingTag] setNativeInputValue error:", e?.name, e?.message);
+        return false;
+    }
+}
+
+/** หา filter row ทั้งหมดในหน้า (popover-trigger ที่ไม่ใช่ปุ่ม Filters/global buttons)
+ *
+ * testid ที่เป็นไปได้:
+ *   - "select-trigger-filter:tasks:annotators" (column ที่เลือกแล้ว)
+ *   - "select-trigger-not_contains" (operator ที่เลือกแล้ว)
+ *   - "select-trigger-94542" (value ที่เลือกแล้ว — ID user)
+ *   - "select-trigger" (value ที่ยังว่าง เช่น "Select users")
+ */
+function getFilterRowTriggers() {
+    const all = Array.from(document.querySelectorAll('[data-slot="popover-trigger"]'));
+    return all.filter((b) => {
+        // ข้ามปุ่ม Filters เอง
+        if (b.getAttribute("aria-label") === "Filters") return false;
+        const t = b.getAttribute("data-testid") || "";
+        // รับทั้ง "select-trigger" และ "select-trigger-*"
+        if (t === "select-trigger" || t.startsWith("select-trigger-")) return true;
+        // ถ้าไม่มี testid เลย ให้ดูว่าอยู่ใน popover ของ Filter panel หรือเปล่า
+        const inDialog = b.closest('[role="dialog"]');
+        return !!inDialog;
+    });
+}
+
+/** อ่านค่าที่แสดงอยู่ใน trigger (เช่น "Annotators" / "Does not contain" / "Thai-1-Nuntawut" / "Select users") */
+function getTriggerDisplayValue(trigger) {
+    if (!trigger) return "";
+    const displayEl = trigger.querySelector('[data-testid="select-display-value"]');
+    const text = (displayEl?.innerText || displayEl?.textContent || trigger.innerText || trigger.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
+    return text;
+}
+
+/** อ่าน data-value ของ trigger (เช่น "filter:tasks:annotators" / "not_contains" / "94542") */
+function getTriggerDataValue(trigger) {
+    return (trigger?.getAttribute("data-value") || "").trim();
+}
+
+/** Parse filter rows ปัจจุบัน — group ทุก 3 triggers เป็น 1 row */
+function parseFilterRows() {
+    const triggers = getFilterRowTriggers();
+    const rows = [];
+    for (let i = 0; i + 2 < triggers.length; i += 3) {
+        const colT = triggers[i];
+        const opT = triggers[i + 1];
+        const valT = triggers[i + 2];
+        rows.push({
+            column: getTriggerDisplayValue(colT),
+            operator: getTriggerDisplayValue(opT),
+            value: getTriggerDisplayValue(valT),
+            columnDataValue: getTriggerDataValue(colT),
+            operatorDataValue: getTriggerDataValue(opT),
+            valueDataValue: getTriggerDataValue(valT),
+            columnTrigger: colT,
+            operatorTrigger: opT,
+            valueTrigger: valT,
+        });
+    }
+    return rows;
+}
+
+/** หา filter row ที่ column = Annotators (case-insensitive) */
+function findAnnotatorRow(rows) {
+    const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    for (const row of rows) {
+        const col = norm(row.column);
+        const colDV = norm(row.columnDataValue);
+        // match จากทั้ง display text หรือ data-value (filter:tasks:annotators)
+        if (col === "annotators" || col.startsWith("annotator") || colDV.includes("annotator")) {
+            return row;
+        }
+    }
+    return null;
+}
+
+/** หา <button> ที่ innerText ตรงกับ needle (case-insensitive, normalized whitespace) */
+function findButtonByText(needles, { exact = false } = {}) {
+    const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const lowerNeedles = (Array.isArray(needles) ? needles : [needles]).map(norm);
+    const buttons = document.querySelectorAll('button, [role="button"]');
+    for (const btn of buttons) {
+        const t = norm(btn.innerText || btn.textContent);
+        if (!t) continue;
+        if (exact) {
+            if (lowerNeedles.includes(t)) return btn;
+        } else {
+            if (lowerNeedles.some((n) => t === n || t.includes(n))) return btn;
+        }
+    }
+    return null;
+}
+
+/** รอจน filter row โผล่ (มี trigger ≥ minTriggers ตัว) */
+async function waitForFilterRows(minTriggers = 3, { timeoutMs = 4000 } = {}) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const trs = getFilterRowTriggers();
+        if (trs.length >= minTriggers) return trs;
+        await delay(100);
+    }
+    return getFilterRowTriggers();
+}
+
+/** รอจน trigger เพิ่มขึ้น (หลังคลิก Add Filter — รอแถวใหม่โผล่) */
+async function waitForFilterRowsIncrease(prevCount, { timeoutMs = 5000 } = {}) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const trs = getFilterRowTriggers();
+        if (trs.length > prevCount) return trs;
+        await delay(100);
+    }
+    return getFilterRowTriggers();
+}
+
+/** รอ Radix popover (dialog) ที่ผูกกับ trigger เปิดขึ้น */
+async function waitForPopoverFromTrigger(triggerBtn, { timeoutMs = 4000 } = {}) {
+    const start = Date.now();
+    let lastId = "";
+    while (Date.now() - start < timeoutMs) {
+        // 1) ลองดูจาก aria-controls ก่อน (ตรงและเสถียรสุด)
+        const ctrlId = triggerBtn.getAttribute("aria-controls");
+        if (ctrlId) {
+            lastId = ctrlId;
+            const byId = document.getElementById(ctrlId);
+            if (byId && byId.getAttribute("data-state") !== "closed") return byId;
+        }
+        // 2) fallback: หา dialog/listbox ที่ data-state="open" ตัวล่าสุด
+        const open = document.querySelector(
+            '[role="dialog"][data-state="open"], [role="listbox"][data-state="open"]'
+        );
+        if (open) return open;
+        await delay(80);
+    }
+    console.warn(`[DingTag] waitForPopover timeout (aria-controls=${lastId || "n/a"})`);
+    return null;
+}
+
+/** คลิก option ใน popover ที่ข้อความ "ตรง" หรือ "contain" needle (ไม่สนใจตัวเล็ก/ใหญ่) */
+async function clickOptionInPopover(popover, needle, { timeoutMs = 4000 } = {}) {
+    if (!popover || !needle) return false;
+    const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const needleLower = norm(needle);
+
+    // หา scroll container ใน popover (virtualized list)
+    const findScrollContainer = () => {
+        const all = popover.querySelectorAll("*");
+        for (const el of all) {
+            try {
+                const cs = getComputedStyle(el);
+                const oy = cs.overflowY;
+                if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight + 1) {
+                    return el;
+                }
+            } catch {}
+        }
+        return null;
+    };
+
+    const findInPopover = () => {
+        const candidates = popover.querySelectorAll(
+            '[role="option"], [role="menuitem"], [data-slot="option"], button, li, div[role]'
+        );
+        // pass 1: exact
+        for (const el of candidates) {
+            const t = norm(el.innerText || el.textContent);
+            if (t && t === needleLower) return el;
+        }
+        // pass 2: contains
+        for (const el of candidates) {
+            const t = norm(el.innerText || el.textContent);
+            if (t && t.includes(needleLower)) return el;
+        }
+        return null;
+    };
+
+    const scrollEl = findScrollContainer();
+    const start = Date.now();
+    let scrollProgress = 0;
+
+    while (Date.now() - start < timeoutMs) {
+        let target = findInPopover();
+
+        // ถ้ายังไม่เจอ และ popover scroll ได้ → ค่อย ๆ เลื่อนลงทีละครึ่งหน้า (กัน virtualized list)
+        if (!target && scrollEl) {
+            const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+            if (scrollProgress < maxScroll) {
+                scrollProgress = Math.min(maxScroll, scrollProgress + scrollEl.clientHeight * 0.6);
+                scrollEl.scrollTop = scrollProgress;
+                await delay(150);
+                target = findInPopover();
+            }
+        }
+
+        if (target) {
+            try { target.scrollIntoView?.({ block: "center", inline: "nearest" }); } catch {}
+            const clickable = target.closest?.('[role="option"], [role="menuitem"], button, li') || target;
+            try {
+                clickable.click();
+                return true;
+            } catch (e) {
+                console.warn("[DingTag] clickOptionInPopover click error:", e?.name, e?.message);
+                return false;
+            }
+        }
+        await delay(120);
+    }
+    console.warn(`[DingTag] clickOptionInPopover: ไม่พบ option ที่ตรงกับ "${needle}"`);
+    return false;
+}
+
+/** เปิด trigger (ถ้ายังไม่เปิด) แล้วคลิก option ที่ match needle */
+async function openSelectAndChoose(triggerBtn, needle, { timeoutMs = 4000 } = {}) {
+    if (!triggerBtn) return false;
+    if (triggerBtn.getAttribute("aria-expanded") !== "true") {
+        try { triggerBtn.scrollIntoView?.({ block: "center" }); } catch {}
+        triggerBtn.click();
+    }
+    const popover = await waitForPopoverFromTrigger(triggerBtn, { timeoutMs });
+    if (!popover) return false;
+    const ok = await clickOptionInPopover(popover, needle, { timeoutMs });
+    return ok;
+}
+
+/** เปิด trigger ที่มี search box, พิมพ์ค่า แล้วคลิก option ที่ตรงกัน */
+async function openSelectTypeAndChoose(triggerBtn, valueText, { timeoutMs = 5000 } = {}) {
+    if (!triggerBtn) return false;
+    if (triggerBtn.getAttribute("aria-expanded") !== "true") {
+        try { triggerBtn.scrollIntoView?.({ block: "center" }); } catch {}
+        triggerBtn.click();
+    }
+    const popover = await waitForPopoverFromTrigger(triggerBtn, { timeoutMs });
+    if (!popover) return false;
+
+    // หาช่อง search
+    const input =
+        popover.querySelector('input[type="search"]') ||
+        popover.querySelector('input[type="text"]') ||
+        popover.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])') ||
+        popover.querySelector('[role="combobox"] input') ||
+        popover.querySelector('[contenteditable="true"]');
+    if (input) {
+        try { input.focus(); } catch {}
+        // เคลียร์ก่อน (เผื่อมีค่าเก่าค้าง)
+        setNativeInputValue(input, "");
+        await delay(80);
+        setNativeInputValue(input, valueText);
+        // รอ debounce/filter list
+        await delay(400);
+    } else {
+        console.warn("[DingTag] openSelectTypeAndChoose: ไม่พบ input ใน popover — ลองคลิก option ตรงๆ");
+    }
+
+    return await clickOptionInPopover(popover, valueText, { timeoutMs });
+}
+
+/**
+ * ตั้ง filter ทีละ step (ค่อย ๆ ทำ):
+ *   1) คลิกปุ่ม Filters (เปิด panel)
+ *   2) คลิก "Add Filter" (เพิ่มแถวใหม่ 1 ครั้งเสมอ — ไม่ overwrite แถวเก่า)
+ *   3) ในแถวที่เพิ่งเพิ่ม: เลือก column = Annotators
+ *   4) เลือก operator = Does not contain
+ *   5) พิมพ์ user แล้วเลือก option
+ *
+ * แถวใหม่จะเป็น "แถวล่างสุด" → เราเลือก trigger ตามตำแหน่งสุดท้ายในรายการ
+ */
+async function applyMyAnnotatorFilter() {
+    if (!autoFilterEnabled) {
+        console.log("[DingTag] Apply filter: ปิดอยู่ใน toggle — ข้าม");
+        setStatus("Auto-Filter ปิดอยู่");
+        return false;
+    }
+    if (!isFilterButtonPresent()) {
+        console.log("[DingTag] Apply filter: ไม่เจอปุ่ม Filters บนหน้านี้ — ข้าม");
+        setStatus("Apply filter: ไม่เจอปุ่ม Filters บนหน้านี้");
+        return false;
+    }
+    if (filterApplyInFlight) {
+        console.log("[DingTag] Apply filter: กำลังทำงานอยู่ — ข้ามการเรียกซ้ำ");
+        return false;
+    }
+    const username = (filterAnnotatorUsername || "").trim();
+    if (!username) {
+        console.warn("[DingTag] Apply filter: ยังไม่ได้ตั้งชื่อ user (filterAnnotatorUsername ว่าง)");
+        return false;
+    }
+
+    filterApplyInFlight = true;
+    setStatus(`Apply filter: Annotators ≠ ${username} ...`);
+    console.log(`🚫 [Filter] เริ่มตั้งค่า: Annotators / Does not contain / ${username}`);
+
+    // หน่วงระหว่าง step ให้ UI หายใจ (ค่อย ๆ ทำตามที่ user สั่ง)
+    const STEP_DELAY_MS = 500;
+
+    try {
+        // ─────────── Step 1: คลิก Filters เพื่อเปิด panel ───────────
+        const filterBtn = document.querySelector('button[aria-label="Filters"]');
+        if (!filterBtn) {
+            console.warn("[Filter] Step 1: ไม่พบปุ่ม Filters บนหน้านี้");
+            setStatus("Apply filter: ไม่พบปุ่ม Filters");
+            return false;
+        }
+        if (filterBtn.getAttribute("aria-expanded") !== "true") {
+            console.log("[Filter] Step 1: คลิกปุ่ม Filters เพื่อเปิด panel");
+            setStatus("Filter: เปิด panel");
+            try { filterBtn.scrollIntoView?.({ block: "center" }); } catch {}
+            filterBtn.click();
+            await delay(STEP_DELAY_MS);
+        } else {
+            console.log("[Filter] Step 1: panel เปิดอยู่แล้ว — ข้าม");
+        }
+
+        // ─────────── เช็คก่อน: filter Annotators ตั้งอยู่แล้วหรือยัง ───────────
+        // (ตามที่ user สั่ง: ถ้ามีครบแล้วไม่ต้องทำซ้ำ / ถ้ามีแถวแต่ขาด field ใด → fix เฉพาะที่ขาด /
+        //  ถ้าไม่มีแถวเลย → ไป Step 2 (Add Filter) ตามปกติ)
+        const desiredOp = "Does not contain";
+        const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+        const existingRows = parseFilterRows();
+        const existing = findAnnotatorRow(existingRows);
+
+        if (existing) {
+            const opOk = norm(existing.operator) === norm(desiredOp);
+            const valOk = norm(existing.value) === norm(username);
+            console.log(
+                `[Filter] เจอแถว Annotators อยู่แล้ว — col="${existing.column}" ` +
+                `op="${existing.operator}" (${opOk ? "OK" : "ผิด"}) ` +
+                `val="${existing.value}" (${valOk ? "OK" : "ผิด"})`
+            );
+
+            if (opOk && valOk) {
+                console.log(`✅ [Filter] มี filter ครบอยู่แล้ว — ไม่ต้องทำซ้ำ (Annotators ≠ ${username})`);
+                setStatus(`Filter already set: Annotators ≠ ${username}`);
+                return true;
+            }
+
+            setStatus("Filter: เติมช่องที่ขาด...");
+            console.log("[Filter] เติมเฉพาะ field ที่ขาด/ผิด (ไม่ add แถวใหม่)");
+
+            // fix operator ถ้าผิด
+            if (!opOk) {
+                console.log(`[Filter] เติม operator: "${existing.operator}" → "${desiredOp}"`);
+                const ok = await openSelectAndChoose(existing.operatorTrigger, desiredOp);
+                if (!ok) {
+                    console.warn("[Filter] เติม operator ไม่สำเร็จ");
+                    setStatus("Apply filter: เติม operator ไม่ได้");
+                    return false;
+                }
+                console.log(`✅ [Filter] เติม operator = ${desiredOp}`);
+                await delay(STEP_DELAY_MS);
+            }
+
+            // fix value ถ้าผิด (re-query trigger เพราะอาจถูก re-render หลังเปลี่ยน operator)
+            if (!valOk) {
+                const refreshedRow = findAnnotatorRow(parseFilterRows()) || existing;
+                const valTrigger = refreshedRow.valueTrigger;
+                console.log(`[Filter] เติม value: "${existing.value}" → "${username}"`);
+                const ok = await openSelectTypeAndChoose(valTrigger, username);
+                if (!ok) {
+                    console.warn(`[Filter] เติม user "${username}" ไม่สำเร็จ`);
+                    setStatus(`Apply filter: เติม ${username} ไม่ได้`);
+                    return false;
+                }
+                console.log(`✅ [Filter] เติม value = ${username}`);
+                await delay(STEP_DELAY_MS);
+                dispatchEnterKey();
+                await delay(200);
+            }
+
+            setStatus(`Filter applied (เติม): Annotators ≠ ${username}`);
+            console.log(`✅ [Filter] เติมครบ — Annotators ≠ ${username}`);
+            return true;
+        }
+
+        console.log("[Filter] ยังไม่เจอแถว Annotators เลย — จะ Add Filter แถวใหม่");
+
+        // ─────────── Step 2: คลิก "Add Filter" 1 ครั้ง (เสมอ) ───────────
+        const triggersBefore = getFilterRowTriggers().length;
+        console.log(`[Filter] Step 2/5: หาปุ่ม Add Filter (มี trigger เดิม ${triggersBefore} ตัว)`);
+        setStatus("Filter 2/5: คลิก Add Filter");
+
+        let addBtn = findButtonByText(
+            ["Add Filter", "Add filter", "Add Another", "Add another"],
+            { exact: false }
+        );
+        if (!addBtn) {
+            console.log("[Filter] ยังไม่เจอปุ่ม Add Filter — รอ 600ms แล้วลองอีกครั้ง");
+            await delay(600);
+            addBtn = findButtonByText(
+                ["Add Filter", "Add filter", "Add Another", "Add another"],
+                { exact: false }
+            );
+        }
+        if (!addBtn) {
+            console.warn("[Filter] ไม่พบปุ่ม Add Filter / Add Another เลย");
+            setStatus("Apply filter: ไม่พบปุ่ม Add Filter");
+            return false;
+        }
+        console.log(`[Filter] คลิก "${(addBtn.innerText || "").trim()}"`);
+        try { addBtn.scrollIntoView?.({ block: "center" }); } catch {}
+        addBtn.click();
+
+        // รอแถวใหม่โผล่ (trigger เพิ่มขึ้นอย่างน้อย 1 ตัว)
+        let triggers = await waitForFilterRowsIncrease(triggersBefore, { timeoutMs: 5000 });
+        if (triggers.length <= triggersBefore) {
+            console.warn(
+                `[Filter] รอแถวใหม่ไม่ทัน — trigger ยังเท่าเดิม (${triggers.length})`
+            );
+            setStatus("Apply filter: คลิก Add Filter แล้วแถวไม่โผล่");
+            return false;
+        }
+        console.log(
+            `[Filter] แถวใหม่โผล่แล้ว — trigger ${triggersBefore} → ${triggers.length}`
+        );
+        await delay(STEP_DELAY_MS);
+
+        // helper: ดึง trigger ของแถวใหม่ (column/operator/value) — แถวใหม่อยู่ "ล่างสุด" เสมอ
+        // (เพราะใหม่ถูก append เข้ารายการ)
+        const getNewRowTriggers = () => {
+            const all = getFilterRowTriggers();
+            // ถ้ามี trigger ≥ 3 ตัว → 3 ตัวสุดท้ายคือแถวใหม่
+            // ถ้าน้อยกว่า → คืน array ที่มีเท่าที่หาเจอ (caller จัดการเอง)
+            return all.slice(-3);
+        };
+
+        // ─────────── Step 3: เลือก column = Annotators (ในแถวล่างสุด) ───────────
+        // แถวใหม่ default เป็น "Audio (data)" — ต้องเปิด dropdown พิมพ์ "Annotators" แล้วเลือก
+        // (ใช้ type-and-choose เพราะ dropdown อาจ virtualized และมี search box)
+        let newRow = getNewRowTriggers();
+        if (newRow.length === 0) {
+            console.warn("[Filter] ไม่มี trigger เลยหลังเพิ่มแถว");
+            setStatus("Apply filter: ไม่เจอ trigger");
+            return false;
+        }
+        let colTrigger = newRow[0]; // ตัวแรกของแถวใหม่ = column
+        console.log(
+            `[Filter] Step 3/5: เปิด column dropdown แล้วเลือก "Annotators" ` +
+                `(ค่าปัจจุบัน: "${(colTrigger.innerText || "").replace(/\s+/g, " ").trim()}")`
+        );
+        setStatus("Filter 3/5: เลือก Annotators");
+        const colOk = await openSelectTypeAndChoose(colTrigger, "Annotators");
+        if (!colOk) {
+            // fallback: ลองแบบไม่พิมพ์ search (กรณี dropdown ไม่มี search input)
+            console.log("[Filter] type-and-choose ล้มเหลว → ลอง open-and-choose ตรง ๆ");
+            newRow = getNewRowTriggers();
+            colTrigger = newRow[0];
+            if (!(await openSelectAndChoose(colTrigger, "Annotators"))) {
+                console.warn("[Filter] เลือก Annotators ไม่สำเร็จ");
+                setStatus("Apply filter: เลือก Annotators ไม่ได้");
+                return false;
+            }
+        }
+        console.log("✅ [Filter] column = Annotators");
+        await delay(STEP_DELAY_MS);
+
+        // ─────────── Step 4: เลือก operator = Does not contain ───────────
+        newRow = getNewRowTriggers();
+        if (newRow.length < 2) {
+            console.warn("[Filter] หลังเลือก column ยังหา operator trigger ไม่เจอ");
+            setStatus("Apply filter: ไม่เจอ operator trigger");
+            return false;
+        }
+        const opTrigger = newRow[1]; // ตัวที่ 2 ของแถวใหม่ = operator
+        console.log("[Filter] Step 4/5: เปิด operator dropdown แล้วเลือก \"Does not contain\"");
+        setStatus("Filter 4/5: เลือก Does not contain");
+        const opOk = await openSelectAndChoose(opTrigger, "Does not contain");
+        if (!opOk) {
+            console.warn("[Filter] เลือก operator ไม่สำเร็จ");
+            setStatus("Apply filter: เลือก Does not contain ไม่ได้");
+            return false;
+        }
+        console.log("✅ [Filter] operator = Does not contain");
+        await delay(STEP_DELAY_MS);
+
+        // ─────────── Step 5: พิมพ์ user แล้วเลือก option ───────────
+        newRow = getNewRowTriggers();
+        if (newRow.length < 3) {
+            console.warn("[Filter] หลังเลือก operator ยังหา value trigger ไม่เจอ");
+            setStatus("Apply filter: ไม่เจอ value trigger");
+            return false;
+        }
+        const valTrigger = newRow[2]; // ตัวที่ 3 = value
+        console.log(`[Filter] Step 5/6: พิมพ์และเลือก "${username}"`);
+        setStatus(`Filter 5/6: เลือก ${username}`);
+        const valOk = await openSelectTypeAndChoose(valTrigger, username);
+        if (!valOk) {
+            console.warn(`[Filter] เลือก user "${username}" ไม่สำเร็จ`);
+            setStatus(`Apply filter: เลือก ${username} ไม่ได้`);
+            return false;
+        }
+        console.log(`✅ [Filter] value = ${username}`);
+        await delay(STEP_DELAY_MS);
+
+        // ─────────── Step 6: กด Enter เพื่อ apply filter ───────────
+        console.log("[Filter] Step 6/6: กด Enter เพื่อยืนยัน");
+        setStatus("Filter 6/6: กด Enter");
+        dispatchEnterKey();
+        await delay(200);
+        console.log(`✅ [Filter] เสร็จครบทุก step! (Annotators ≠ ${username})`);
+        setStatus(`Filter applied: Annotators ≠ ${username}`);
+        return true;
+    } catch (e) {
+        console.warn("[Filter] applyMyAnnotatorFilter error:", e?.name, e?.message, e);
+        setStatus("Apply filter: error");
+        return false;
+    } finally {
+        filterApplyInFlight = false;
+    }
+}
+
+/**
+ * Auto-recovery sequence เมื่อ BOT ไม่เจอ target task นาน:
+ *   1) apply filter (Annotators / Does not contain / <user>) — 6 steps
+ *   2) blur active element (ปิด popover/dropdown ที่ค้างอยู่)
+ *   3) กด Shift+ArrowDown (เลื่อนไป task ถัดไปใน list ที่ถูก filter)
+ */
+async function runAutoFilterRecovery() {
+    console.log("🚨 [Auto-Filter] BOT ไม่เจอ target นาน → เริ่ม recovery sequence");
+    setStatus("Auto-Filter recovery: apply filter...");
+
+    const ok = await applyMyAnnotatorFilter();
+    if (!ok) {
+        console.warn("⚠️ [Auto-Filter] applyMyAnnotatorFilter ไม่สำเร็จ — ข้าม blur/Shift+↓");
+        return false;
+    }
+
+    // (2) blur active element เพื่อปิด popover/dropdown ที่อาจค้างหลัง apply
+    try {
+        const ae = document.activeElement;
+        if (ae && typeof ae.blur === "function" && ae !== document.body) {
+            ae.blur();
+            console.log("👀 [Auto-Filter] blur active element แล้ว — รอ 3 วิ ก่อน Shift+↓");
+        } else {
+            console.log("👀 [Auto-Filter] ไม่มี element ที่ต้อง blur — รอ 3 วิ ก่อน Shift+↓");
+        }
+    } catch {}
+    setStatus("Auto-Filter: รอ 3 วิ ก่อน Shift+↓");
+    await delay(3000);
+
+    // (3) Shift+ArrowDown เพื่อเลื่อนไป task ถัดไปใน list ที่ถูก filter
+    if (dispatchShiftArrowDown()) {
+        console.log("⌨️ [Auto-Filter] dispatch Shift+ArrowDown แล้ว");
+        setStatus("Auto-Filter: ส่ง Shift+↓ เลื่อนไป task ถัดไป");
+    } else {
+        console.warn("⚠️ [Auto-Filter] dispatch Shift+ArrowDown ล้มเหลว");
+    }
+    return true;
+}
+
+// Hotkey: Shift+ArrowUp → applyMyAnnotatorFilter
+// - ทำงานก็ต่อเมื่อ Auto-Filter toggle ON และเจอปุ่ม Filters บนหน้านี้
+// - ไม่ทำงานถ้ากำลังพิมพ์ในช่อง input/textarea/contenteditable (ปล่อยให้ event ผ่านไป)
+// - capture phase + preventDefault เพื่อกัน LSF/Browser หยิบ event ไปก่อน
+document.addEventListener(
+    "keydown",
+    (e) => {
+        if (!e.shiftKey) return;
+        if (e.key !== "ArrowUp") return;
+        if (e.ctrlKey || e.altKey || e.metaKey) return;
+        if (e.repeat) return;
+
+        const ae = document.activeElement;
+        const tag = ae?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || ae?.isContentEditable) return;
+
+        // ถ้าฟีเจอร์ปิด หรือไม่เจอปุ่ม Filters บนหน้านี้ → ไม่ทำอะไร (ปล่อยให้ default behavior ทำงาน)
+        if (!autoFilterEnabled) return;
+        if (!isFilterButtonPresent()) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        console.log("⌨️ Hotkey Shift+↑ → Apply My Annotator Filter");
+        applyMyAnnotatorFilter().catch((err) => {
+            console.warn("[DingTag] hotkey apply filter error:", err?.name, err?.message);
+        });
+    },
+    true
+);
+
 setInterval(() => {
     if (!isAutoPilotOn || isProcessing) return;
     if (location.href !== lastSeenUrl) {
@@ -2214,18 +3034,20 @@ setInterval(() => {
             if (currentTaskId === lastProcessedTaskId || processedTaskIds.has(currentTaskId)) {
                 const now = Date.now();
 
-                // ถ้าเด้งกลับมา task ที่เคยทำแล้ว (อยู่ใน Set) → Shift+↓ ข้ามทันที
+                // ถ้าเด้งกลับมา task ที่เคยทำแล้ว (อยู่ใน Set) → Shift+↑ กลับขึ้นไปหา task ใหม่
+                // (เปลี่ยนจาก Shift+↓ → Shift+↑ ตามคำขอ user: เจอ task ซ้ำให้กลับขึ้นไป
+                //  แทนที่จะลงไปต่อ เพราะลงไปต่อก็เป็น task ที่เคยทำแล้วเช่นกัน)
                 if (processedTaskIds.has(currentTaskId) && currentTaskId !== lastProcessedTaskId) {
-                    console.log(`⏭️ task ${currentTaskId} เคยทำแล้ว (เด้งกลับ) → Shift+↓ ข้าม (delay ${duplicateSkipDelayMs}ms)`);
-                    setStatus(`task ${currentTaskId} เคยทำแล้ว → ข้ามไป task ถัดไป`);
+                    console.log(`⏮️ task ${currentTaskId} เคยทำแล้ว (เด้งกลับ) → Shift+↑ กลับขึ้น (delay ${duplicateSkipDelayMs}ms)`);
+                    setStatus(`task ${currentTaskId} เคยทำแล้ว → Shift+↑ กลับขึ้น`);
                     lastProcessedTaskId = currentTaskId;
                     isProcessing = true;
                     (async () => {
                         try {
                             await delay(duplicateSkipDelayMs);
-                            const sent = await goToNextTask({ runToken: null });
+                            const sent = await goToPreviousTask({ runToken: null });
                             if (sent) {
-                                console.log(`⏭️ duplicate-skip: ส่ง Shift+↓ จาก task ${currentTaskId} แล้ว`);
+                                console.log(`⏮️ duplicate-skip: ส่ง Shift+↑ จาก task ${currentTaskId} แล้ว`);
                             }
                             await delay(duplicateSkipDelayMs);
                         } catch (e) {
@@ -2581,6 +3403,47 @@ setInterval(() => {
                         "⏳ ON อยู่ แต่ยังไม่เจอ target (Classification: Valid/Invalid) — ตรวจหน้าเว็บ/DOM/สิทธิ์ Extension"
                     );
                     setStatus("ยังไม่เจอ target (รอ Classification Valid/Invalid...)");
+                }
+
+                // ─────── Auto-Filter recovery: ถ้า bot ไม่เจอ target นาน → apply filter อัตโนมัติ ───────
+                // เงื่อนไข:
+                //   - bot ON อยู่ (อยู่ใน polling loop แล้ว = isAutoPilotOn = true)
+                //   - autoFilterEnabled toggle ON
+                //   - เจอปุ่ม Filters บนหน้านี้
+                //   - filter ไม่ได้กำลังทำงาน
+                //   - "ไม่เจอ target" ติดต่อกัน ≥ NO_TARGET_AUTO_FILTER_AFTER_MS
+                //   - cooldown ผ่านแล้ว (กัน loop)
+                if (autoFilterEnabled && !filterApplyInFlight && isFilterButtonPresent()) {
+                    if (noTargetIdleSince === 0) {
+                        noTargetIdleSince = now;
+                    }
+                    const idleFor = now - noTargetIdleSince;
+                    const sinceLast = now - lastAutoFilterAt;
+                    if (
+                        idleFor >= NO_TARGET_AUTO_FILTER_AFTER_MS &&
+                        sinceLast >= AUTO_FILTER_COOLDOWN_MS
+                    ) {
+                        lastAutoFilterAt = now;
+                        noTargetIdleSince = 0;
+                        isProcessing = true;
+                        (async () => {
+                            try {
+                                await runAutoFilterRecovery();
+                            } catch (e) {
+                                console.warn(
+                                    "[DingTag] Auto-Filter recovery error:",
+                                    e?.name,
+                                    e?.message
+                                );
+                            } finally {
+                                await delay(1500);
+                                isProcessing = false;
+                            }
+                        })();
+                    }
+                } else if (noTargetIdleSince !== 0) {
+                    // เงื่อนไขใดเงื่อนไขหนึ่งหายไป → รีเซ็ตตัวจับเวลา
+                    noTargetIdleSince = 0;
                 }
             }
         }
