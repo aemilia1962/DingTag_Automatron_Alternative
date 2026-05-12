@@ -48,14 +48,14 @@ let duplicateSkipDelayMs = Math.max(
 );
 // Duplicate-loop breaker: ถ้า task เดิมถูกตรวจเจอ (แบบเด้งกลับ) เกิน threshold ครั้ง
 // ภายในหน้าต่างเลื่อนนี้ → บังคับใช้ Shift+↓ แทน Shift+↑ เพื่อตัด loop ที่ Shift+↑ วนกลับมาตัวเดิม
-// (default: 3 ครั้งใน 120,000 ms = 2 นาที)
+// (default: 2 ครั้งใน 600,000 ms = 10 นาที → force clear task history)
 let duplicateLoopWindowMs = Math.max(
     10000,
-    parseInt(localStorage.getItem("dingtag_duplicate_loop_window_ms") || "120000", 10) || 120000
+    parseInt(localStorage.getItem("dingtag_duplicate_loop_window_ms") || "600000", 10) || 600000
 );
 let duplicateLoopThreshold = Math.max(
     2,
-    parseInt(localStorage.getItem("dingtag_duplicate_loop_threshold") || "3", 10) || 3
+    parseInt(localStorage.getItem("dingtag_duplicate_loop_threshold") || "2", 10) || 2
 );
 // Map<taskId, number[]> — เก็บ timestamp ของแต่ละครั้งที่ "เจอเด้งกลับ" สำหรับ taskId นั้น
 const duplicateTaskEncounters = new Map();
@@ -3592,16 +3592,18 @@ setInterval(() => {
                     const encounterCount = recordDuplicateEncounter(currentTaskId);
                     const windowSec = (duplicateLoopWindowMs / 1000).toFixed(0);
 
-                    // ถ้าซ้ำเกิน threshold ภายใน window → loop จริง: Shift+↑ พาวนกลับมาที่เดิม
-                    // ต้อง override เป็น Shift+↓ เพื่อทะลุออกจาก loop
+                    // ถ้าซ้ำเกิน threshold ภายใน window → loop จริง
+                    // force clear task history ทั้งหมดเพื่อให้ bot เริ่มนับใหม่ แล้วกด Shift+↓ ทะลุออก
                     if (encounterCount >= duplicateLoopThreshold) {
+                        const clearedCount = processedTaskIds.size;
+                        processedTaskIds.clear();
+                        duplicateTaskEncounters.clear();
                         console.log(
-                            `🔁 task ${currentTaskId} เด้งกลับซ้ำ ${encounterCount} รอบใน ${windowSec} วิ → break loop ด้วย Shift+↓ (delay ${duplicateSkipDelayMs}ms)`
+                            `🔁 task ${currentTaskId} เด้งกลับซ้ำ ${encounterCount} รอบใน ${windowSec} วิ → force clear history (${clearedCount} tasks) + Shift+↓ break loop`
                         );
                         setStatus(
-                            `task ${currentTaskId} ซ้ำ ${encounterCount}/${duplicateLoopThreshold} รอบใน ${windowSec} วิ → Shift+↓ break loop`
+                            `ซ้ำ ${encounterCount}/${duplicateLoopThreshold} ใน ${windowSec} วิ → ล้างประวัติ ${clearedCount} tasks + Shift+↓`
                         );
-                        duplicateTaskEncounters.delete(currentTaskId);
                         lastProcessedTaskId = currentTaskId;
                         isProcessing = true;
                         (async () => {
@@ -3610,7 +3612,7 @@ setInterval(() => {
                                 const sent = await goToNextTask({ runToken: null });
                                 if (sent) {
                                     console.log(
-                                        `⏭️ duplicate-loop break: ส่ง Shift+↓ จาก task ${currentTaskId} แล้ว`
+                                        `⏭️ duplicate-loop break: ส่ง Shift+↓ จาก task ${currentTaskId} แล้ว (history cleared)`
                                     );
                                 } else {
                                     console.warn(
