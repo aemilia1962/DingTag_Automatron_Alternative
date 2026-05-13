@@ -6,8 +6,10 @@ const LOCAL_PHYSICAL_CLICK_URL = "http://127.0.0.1:54321/api/physical_click";
 
 let isAutoPilotOn = false;
 let isProcessing = false;
-let readDelay = 1500;
-let moveDelay = 8000;
+/** รอก่อนคลิกแรก (ms) — คงที่; ไม่มีสไลเดอร์ใน Settings */
+const READ_DELAY_MS = 1500;
+/** หลังกรอก textarea → ก่อน refocus + Update (ms) — คงที่; ไม่มีสไลเดอร์ใน Settings */
+const MOVE_DELAY_MS = 8000;
 /** หน่วงอย่างน้อย (มิลลิวิ) จากจุดเริ่มงานจนถึงก่อนกด Accept — ถ้างานจบเร็วเกินจะรอให้ครบ; ถ้าเกินเวลานี้อยู่แล้วไม่รอเพิ่ม */
 let minElapsedBeforeAcceptMs = Math.max(
     0,
@@ -40,11 +42,8 @@ let stuckTaskTimeoutMs = Math.max(
 );
 let stuckTaskDetectedAt = 0;
 let stuckTaskId = "";
-// Duplicate skip delay: หน่วงก่อน Shift+↓ เมื่อเจอ task ที่เคยทำแล้ว
-let duplicateSkipDelayMs = Math.max(
-    0,
-    parseInt(localStorage.getItem("dingtag_duplicate_skip_delay_ms") || "300", 10) || 300
-);
+/** หน่วงก่อน Shift+↑/↓ เมื่อเจอ task ซ้ำ (เด้งกลับ) — คงที่; ไม่มีสไลเดอร์ใน Settings */
+const DUPLICATE_SKIP_DELAY_MS = 500;
 // Duplicate-loop breaker: ถ้า task เดิมถูกตรวจเจอ (แบบเด้งกลับ) เกิน threshold ครั้ง
 // ภายในหน้าต่างเลื่อนนี้ → บังคับใช้ Shift+↓ แทน Shift+↑ เพื่อตัด loop ที่ Shift+↑ วนกลับมาตัวเดิม
 // (default: 2 ครั้งใน 600,000 ms = 10 นาที → force clear task history)
@@ -409,6 +408,9 @@ headerRow.style.alignItems = "center";
 headerRow.style.justifyContent = "space-between";
 headerRow.style.gap = "8px";
 headerRow.style.marginBottom = "12px";
+headerRow.style.cursor = "grab";
+headerRow.style.userSelect = "none";
+headerRow.title = "ลากแถบนี้เพื่อย้ายแผง (จำตำแหน่งอัตโนมัติ)";
 
 const title = document.createElement("div");
 title.innerText = "🤖 DingTalk V21 (Local API)";
@@ -416,6 +418,7 @@ title.style.fontWeight = "bold";
 title.style.fontSize = "13px";
 title.style.lineHeight = "1.2";
 title.style.flex = "1";
+title.style.userSelect = "none";
 
 const settingsBtn = document.createElement("button");
 settingsBtn.type = "button";
@@ -464,35 +467,9 @@ settingsContainer.style.paddingTop = "10px";
 settingsContainer.style.borderTop = "1px solid rgba(255,255,255,0.12)";
 settingsContainer.style.display = "none";
 
-const readLabel = document.createElement("div");
-readLabel.style.fontSize = "12px";
-readLabel.style.marginTop = "8px";
-settingsContainer.appendChild(readLabel);
-const readSlider = document.createElement("input");
-readSlider.type = "range";
-readSlider.min = "500";
-readSlider.max = "5000";
-readSlider.step = "100";
-readSlider.value = readDelay;
-readSlider.style.width = "100%";
-settingsContainer.appendChild(readSlider);
-
-const moveLabel = document.createElement("div");
-moveLabel.style.fontSize = "12px";
-moveLabel.style.marginTop = "10px";
-settingsContainer.appendChild(moveLabel);
-const moveSlider = document.createElement("input");
-moveSlider.type = "range";
-moveSlider.min = "300";
-moveSlider.max = "15000";
-moveSlider.step = "100";
-moveSlider.value = moveDelay;
-moveSlider.style.width = "100%";
-settingsContainer.appendChild(moveSlider);
-
 const minAcceptLabel = document.createElement("div");
 minAcceptLabel.style.fontSize = "12px";
-minAcceptLabel.style.marginTop = "10px";
+minAcceptLabel.style.marginTop = "8px";
 settingsContainer.appendChild(minAcceptLabel);
 const minAcceptSlider = document.createElement("input");
 minAcceptSlider.type = "range";
@@ -578,27 +555,6 @@ settingsContainer.appendChild(stuckTaskSlider);
 stuckTaskSlider.addEventListener("input", (e) => {
     stuckTaskTimeoutMs = Math.max(3000, parseInt(e.target.value, 10) || 10000);
     localStorage.setItem("dingtag_stuck_task_timeout_ms", String(stuckTaskTimeoutMs));
-    updateLabels();
-});
-
-const dupSkipLabel = document.createElement("div");
-dupSkipLabel.style.color = "#ccc";
-dupSkipLabel.style.fontSize = "12px";
-dupSkipLabel.style.marginTop = "8px";
-settingsContainer.appendChild(dupSkipLabel);
-const dupSkipSlider = document.createElement("input");
-dupSkipSlider.type = "range";
-dupSkipSlider.min = "0";
-dupSkipSlider.max = "3000";
-dupSkipSlider.step = "100";
-dupSkipSlider.value = String(duplicateSkipDelayMs);
-dupSkipSlider.style.width = "100%";
-dupSkipSlider.title = "หน่วงก่อน Shift+↓ เมื่อเจอ task ซ้ำ (เด้งกลับ)";
-settingsContainer.appendChild(dupSkipSlider);
-
-dupSkipSlider.addEventListener("input", (e) => {
-    duplicateSkipDelayMs = Math.max(0, parseInt(e.target.value, 10) || 300);
-    localStorage.setItem("dingtag_duplicate_skip_delay_ms", String(duplicateSkipDelayMs));
     updateLabels();
 });
 
@@ -837,16 +793,106 @@ settingsContainer.appendChild(clearHistoryBtn);
 panel.appendChild(settingsContainer);
 document.body.appendChild(panel);
 
+const PANEL_POS_STORAGE_KEY = "dingtag_panel_position";
+
+function clampPanelToViewport(left, top) {
+    const w = panel.offsetWidth || 270;
+    const h = panel.offsetHeight || 120;
+    const maxL = Math.max(0, window.innerWidth - w);
+    const maxT = Math.max(0, window.innerHeight - h);
+    return {
+        left: Math.min(Math.max(0, left), maxL),
+        top: Math.min(Math.max(0, top), maxT),
+    };
+}
+
+function applyStoredPanelPosition() {
+    try {
+        const raw = localStorage.getItem(PANEL_POS_STORAGE_KEY);
+        if (!raw) return;
+        const pos = JSON.parse(raw);
+        const left = Number(pos?.left);
+        const top = Number(pos?.top);
+        if (!Number.isFinite(left) || !Number.isFinite(top)) return;
+        panel.style.right = "";
+        panel.style.bottom = "";
+        const c = clampPanelToViewport(left, top);
+        panel.style.left = `${c.left}px`;
+        panel.style.top = `${c.top}px`;
+    } catch {
+        /* ignore */
+    }
+}
+
+function persistPanelPosition() {
+    try {
+        const r = panel.getBoundingClientRect();
+        localStorage.setItem(PANEL_POS_STORAGE_KEY, JSON.stringify({ left: r.left, top: r.top }));
+    } catch {
+        /* ignore */
+    }
+}
+
+applyStoredPanelPosition();
+
+let panelDragState = null;
+
+function onPanelPointerMove(e) {
+    if (!panelDragState) return;
+    const dx = e.clientX - panelDragState.originClientX;
+    const dy = e.clientY - panelDragState.originClientY;
+    const c = clampPanelToViewport(panelDragState.originLeft + dx, panelDragState.originTop + dy);
+    panel.style.left = `${c.left}px`;
+    panel.style.top = `${c.top}px`;
+}
+
+function endPanelDrag() {
+    if (!panelDragState) return;
+    panelDragState = null;
+    headerRow.style.cursor = "grab";
+    document.removeEventListener("mousemove", onPanelPointerMove, true);
+    document.removeEventListener("mouseup", endPanelDrag, true);
+    persistPanelPosition();
+}
+
+headerRow.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest("button")) return;
+    const r = panel.getBoundingClientRect();
+    panel.style.right = "";
+    panel.style.bottom = "";
+    panel.style.left = `${r.left}px`;
+    panel.style.top = `${r.top}px`;
+    panelDragState = {
+        originClientX: e.clientX,
+        originClientY: e.clientY,
+        originLeft: r.left,
+        originTop: r.top,
+    };
+    headerRow.style.cursor = "grabbing";
+    document.addEventListener("mousemove", onPanelPointerMove, true);
+    document.addEventListener("mouseup", endPanelDrag, true);
+    e.preventDefault();
+});
+
+window.addEventListener("resize", () => {
+    if (!panel.style.left || panel.style.left === "" || !panel.style.top || panel.style.top === "") return;
+    const r = panel.getBoundingClientRect();
+    const c = clampPanelToViewport(r.left, r.top);
+    if (Math.abs(c.left - r.left) > 0.5 || Math.abs(c.top - r.top) > 0.5) {
+        panel.style.left = `${c.left}px`;
+        panel.style.top = `${c.top}px`;
+        persistPanelPosition();
+    }
+});
+
 function updateLabels() {
-    readLabel.innerText = `⏱️ รอก่อนคลิกแรก: ${(readDelay / 1000).toFixed(1)} วิ`;
-    moveLabel.innerText = `🖱️ ระยะห่างสองคลิก: ${(moveDelay / 1000).toFixed(1)} วิ`;
     minAcceptLabel.innerText =
         minElapsedBeforeAcceptMs <= 0
             ? `🛡️ ก่อนกด Accept อย่างน้อย: ปิด (ไม่บังคับ)`
             : `🛡️ ก่อนกด Accept อย่างน้อย: ${(minElapsedBeforeAcceptMs / 1000).toFixed(0)} วิ (งานเร็วเกินจะรอให้ครบ)`;
     autoSkipTimeoutLabel.innerText = `⏭️ Auto-Skip timeout: ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ`;
     stuckTaskLabel.innerText = `🔄 Stuck Task timeout: ${(stuckTaskTimeoutMs / 1000).toFixed(0)} วิ`;
-    dupSkipLabel.innerText = `⏩ Duplicate Skip delay: ${duplicateSkipDelayMs} ms`;
 }
 updateLabels();
 
@@ -871,14 +917,6 @@ toggleBtn.addEventListener("click", () => {
 settingsBtn.addEventListener("click", () => {
     const isOpen = settingsContainer.style.display !== "none";
     settingsContainer.style.display = isOpen ? "none" : "block";
-});
-readSlider.addEventListener("input", (e) => {
-    readDelay = parseInt(e.target.value);
-    updateLabels();
-});
-moveSlider.addEventListener("input", (e) => {
-    moveDelay = parseInt(e.target.value);
-    updateLabels();
 });
 minAcceptSlider.addEventListener("input", (e) => {
     minElapsedBeforeAcceptMs = Math.max(0, parseInt(e.target.value, 10) || 0);
@@ -3803,7 +3841,7 @@ setInterval(() => {
                         isProcessing = true;
                         (async () => {
                             try {
-                                await delay(duplicateSkipDelayMs);
+                                await delay(DUPLICATE_SKIP_DELAY_MS);
                                 const sent = await goToNextTask({ runToken: null });
                                 if (sent) {
                                     console.log(
@@ -3814,7 +3852,7 @@ setInterval(() => {
                                         `⚠️ duplicate-loop break: ส่ง Shift+↓ ไม่สำเร็จ (task ${currentTaskId})`
                                     );
                                 }
-                                await delay(duplicateSkipDelayMs);
+                                await delay(DUPLICATE_SKIP_DELAY_MS);
                             } catch (e) {
                                 console.warn(
                                     "[DingTag] duplicate-loop break error:",
@@ -3829,7 +3867,7 @@ setInterval(() => {
                     }
 
                     console.log(
-                        `⏮️ task ${currentTaskId} เคยทำแล้ว (เด้งกลับ, รอบ ${encounterCount}/${duplicateLoopThreshold} ใน ${windowSec} วิ) → Shift+↑ กลับขึ้น (delay ${duplicateSkipDelayMs}ms)`
+                        `⏮️ task ${currentTaskId} เคยทำแล้ว (เด้งกลับ, รอบ ${encounterCount}/${duplicateLoopThreshold} ใน ${windowSec} วิ) → Shift+↑ กลับขึ้น (delay ${DUPLICATE_SKIP_DELAY_MS}ms)`
                     );
                     setStatus(
                         `task ${currentTaskId} เคยทำแล้ว (${encounterCount}/${duplicateLoopThreshold}) → Shift+↑ กลับขึ้น`
@@ -3838,12 +3876,12 @@ setInterval(() => {
                     isProcessing = true;
                     (async () => {
                         try {
-                            await delay(duplicateSkipDelayMs);
+                            await delay(DUPLICATE_SKIP_DELAY_MS);
                             const sent = await goToPreviousTask({ runToken: null });
                             if (sent) {
                                 console.log(`⏮️ duplicate-skip: ส่ง Shift+↑ จาก task ${currentTaskId} แล้ว`);
                             }
-                            await delay(duplicateSkipDelayMs);
+                            await delay(DUPLICATE_SKIP_DELAY_MS);
                         } catch (e) {
                             console.warn("[DingTag] duplicate-skip error:", e?.name, e?.message);
                         } finally {
@@ -3916,7 +3954,7 @@ setInterval(() => {
                     activeRunToken = runToken;
                     const cycleStartAt = Date.now();
 
-                    await delay(readDelay);
+                    await delay(READ_DELAY_MS);
                     if (!isRunActive(runToken)) return;
 
                     targetEl.click();
@@ -4070,7 +4108,7 @@ setInterval(() => {
                         return;
                     }
 
-                    await delay(moveDelay);
+                    await delay(MOVE_DELAY_MS);
                     if (!isRunActive(runToken)) return;
 
                     await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
