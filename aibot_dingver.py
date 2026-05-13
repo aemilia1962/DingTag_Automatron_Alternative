@@ -692,6 +692,20 @@ def is_hallucinated_repetition(text: str) -> tuple[bool, dict]:
     return (False, info)
 
 
+def stamp_final_hallucination_meta(meta: dict[str, Any], out_text: str) -> None:
+    """ตั้ง stillHallucinated จากข้อความถอดเสียงสุดท้ายที่ส่งให้ client (ทุก path หลัง guard)"""
+    bad, finfo = is_hallucinated_repetition(out_text or "")
+    meta["stillHallucinated"] = bool(bad)
+    if bad:
+        meta["finalUnit"] = (finfo.get("unit") or "")[:30]
+        meta["finalReps"] = int(finfo.get("reps", 0) or 0)
+        meta["finalRunChars"] = int(finfo.get("runChars", 0) or 0)
+    else:
+        meta.pop("finalUnit", None)
+        meta.pop("finalReps", None)
+        meta.pop("finalRunChars", None)
+
+
 def _clean_transcript_text(raw: str) -> str:
     """Pipeline ทำความสะอาดผลลัพธ์จาก ASR — ใช้ร่วมกันใน hallucination guard"""
     t = force_single_line(raw or "")
@@ -1050,6 +1064,8 @@ class AITranscriberApp(AppUI, ctk.CTk):
           2) ถ้าผลลัพธ์มีคำซ้ำเกินเกณฑ์ → ลองใหม่ด้วย HALLUCINATION_FALLBACK_MODEL
           3) ถ้ายังหลอน หรือ fallback ว่าง/พัง → คืนผลลัพธ์ของ primary (ทำขั้นตอนต่อไป)
 
+        meta จะมี stillHallucinated จากข้อความที่คืนจริง — client ใช้ส่ง Invalid (Data Missing) หลังวางข้อความ
+
         คืน (cleaned_text, hallucination_meta)
         """
         raw_primary = transcribe_audio_with_retry(client, primary_model, b64_clean, prompt_rules)
@@ -1070,6 +1086,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
 
         # No hallucination, or primary already IS the fallback → ใช้เลย
         if not primary_hallu or primary_model == HALLUCINATION_FALLBACK_MODEL:
+            stamp_final_hallucination_meta(meta, primary_text)
             return (primary_text, meta)
 
         print(
@@ -1090,6 +1107,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
             )
         except Exception as e:
             print(f"[⚠️] Fallback model error: {e!r} — ใช้ผลลัพธ์ primary")
+            stamp_final_hallucination_meta(meta, primary_text)
             return (primary_text, meta)
 
         retry_text = _clean_transcript_text(raw_retry)
@@ -1098,6 +1116,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
 
         if not retry_text:
             print("[⚠️] Fallback model คืนค่าว่าง — ใช้ผลลัพธ์ primary")
+            stamp_final_hallucination_meta(meta, primary_text)
             return (primary_text, meta)
 
         retry_hallu, retry_info = is_hallucinated_repetition(retry_text)
@@ -1113,12 +1132,14 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 f"unit='{meta['retriedUnit']}' reps={meta['retriedReps']} "
                 f"run={meta['retriedRunChars']} — ใช้ผลลัพธ์ primary, ทำขั้นตอนต่อไป"
             )
+            stamp_final_hallucination_meta(meta, primary_text)
             return (primary_text, meta)
 
         print(
             f"[✅] Fallback {HALLUCINATION_FALLBACK_MODEL} แก้ปัญหาคำซ้ำได้ "
             f"({meta['textLen']} → {meta['retriedTextLen']} chars)"
         )
+        stamp_final_hallucination_meta(meta, retry_text)
         return (retry_text, meta)
 
     def _finalize_formatted_text(self, formatted: str) -> tuple[str, dict[str, Any]]:

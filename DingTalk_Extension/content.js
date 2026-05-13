@@ -4068,6 +4068,25 @@ setInterval(() => {
                             );
                             return;
                         }
+
+                        // ถอดเสียงแล้วข้อความยังมีคำซ้ำผิดปกติ (เช่น อ้าอ้าอ้า... ยาวๆ) → วางข้อความดิบแล้วส่ง Invalid + Data Missing
+                        if ((qc.hallucination || {}).stillHallucinated === true) {
+                            const hh = qc.hallucination || {};
+                            const u = hh.finalUnit || hh.unit || "";
+                            const r = hh.finalReps ?? hh.reps ?? 0;
+                            console.warn(
+                                `[DingTag] คำซ้ำหลังถอดเสียง (unit='${u}'×${r}) — วางข้อความดิบแล้วส่ง Invalid (Data Missing)`
+                            );
+                            setStatus("คำซ้ำหลังถอดเสียง — วางข้อความแล้วส่ง Data Missing");
+                            safeSetTextarea(runToken, ta, data.text || "", "raw → invalid (repetition)");
+                            await runInvalidDataMissingAcceptFlow(
+                                "Repetitive transcript / data missing (hallucination)",
+                                runToken,
+                                cycleStartAt
+                            );
+                            return;
+                        }
+
                         // Step A: วาง raw transcript ก่อน เพื่อให้มั่นใจว่า "ดูดเสียงมาจริง"
                         safeSetTextarea(runToken, ta, data.text || "", "raw");
                         setStatus("วางข้อความดิบแล้ว (กำลังจัดคำ)...");
