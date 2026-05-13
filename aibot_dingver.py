@@ -131,6 +131,7 @@ def _smooth_move_to_via_setcursor(x0, y0, x1, y1, duration_s, tween_fn=None, ste
 from prompts import (
     DINGTALK_PROMPT,
     formal_instruction,
+    formal_spacing_fix_instruction,
     CONTENT_MODERATION_PROMPT,
     NON_TARGET_LANGUAGE_PROMPT,
 )
@@ -518,6 +519,9 @@ DEFAULT_FORMAL_MODEL = "openai/gpt-4o-mini"
 
 MODERATION_MODEL = "openai/gpt-4o-mini"
 
+# เมื่อผล formalize (เช่น gpt-4o-mini) เว้นวรรคถี่ผิดปกติทุกพยางค์ → ส่งให้ Gemini แก้ spacing
+FORMAL_SPACING_FIX_MODEL = "google/gemini-2.5-flash-lite"
+
 # Hallucination guard: เมื่อ primary model ถอดเสียงแล้วเจอ "คำซ้ำผิดธรรมชาติ" (AI หลอน เช่น
 # "อืออืออือ..." วน 100+ รอบ, "เห้ยเห้ยเห้ย..." วน 30+ รอบ) → ลองใหม่กับ fallback model 1 ครั้ง
 # ถ้ายังหลอนอีก → ใช้ผลลัพธ์ล่าสุดและทำขั้นตอนต่อไปตามปกติ
@@ -576,6 +580,44 @@ def collapse_overspaced_thai(text: str) -> str:
     thai = r"[\u0E00-\u0E7F]"
     out = re.sub(rf"(?<={thai})\s+(?={thai})", "", text)
     return re.sub(r" +", " ", out).strip()
+
+
+def count_thai_letters(text: str) -> int:
+    return sum(1 for c in (text or "") if "\u0e00" <= c <= "\u0e7f")
+
+
+def is_over_spaced_formal_thai(text: str) -> bool:
+    """Heuristic: โมเดล formal (เช่น gpt-4o-mini) เว้นวรรคระหว่างพยางค์/ชิ้นเล็กถี่ผิดปกติ"""
+    t = (text or "").strip()
+    if len(t) < 50:
+        return False
+    thai_n = count_thai_letters(t)
+    if thai_n < 28:
+        return False
+    sc = t.count(" ")
+    if sc < 14:
+        return False
+    if sc / len(t) < 0.10:
+        return False
+    parts = t.split()
+    if len(parts) < 14:
+        return False
+    avg = sum(len(p) for p in parts) / len(parts)
+    if avg <= 3.4 and sc >= thai_n * 0.26:
+        return True
+    if avg <= 4.0 and sc / len(t) >= 0.14:
+        return True
+    # เคสปนคำยาว (เช่น ทราฟฟิก, สเตเดียม) ทำให้ avg สูง แต่ยัง "เว้นถี่" จริง — ดูสัดส่วนโทเคนสั้น + ความหนาแนนช่องว่าง
+    short_n = sum(1 for p in parts if len(p) <= 4)
+    short_share = short_n / len(parts)
+    if (
+        len(parts) >= 20
+        and thai_n >= 40
+        and sc / len(t) >= 0.14
+        and short_share >= 0.52
+    ):
+        return True
+    return False
 
 
 def find_longest_repeated_run(
@@ -1079,6 +1121,53 @@ class AITranscriberApp(AppUI, ctk.CTk):
         )
         return (retry_text, meta)
 
+    def _finalize_formatted_text(self, formatted: str) -> tuple[str, dict[str, Any]]:
+        """หลัง formalize: ถ้าข้อความเว้นวรรคถี่แบบ GPT leak → ให้ Gemini Flash Lite จัด spacing ใหม่"""
+        meta: dict[str, Any] = {
+            "spacingRefined": False,
+            "spacingModel": "",
+            "reason": "",
+        }
+        if not formatted or not formatted.strip():
+            return (formatted, meta)
+        if not is_over_spaced_formal_thai(formatted):
+            return (formatted, meta)
+
+        meta["reason"] = "overspaced_thai_heuristic"
+        sc = formatted.count(" ")
+        print(
+            f"[📐] Formal over-spacing detected (len={len(formatted)} spaces={sc}) "
+            f"→ refine with {FORMAL_SPACING_FIX_MODEL}"
+        )
+        try:
+            max_out = min(8192, max(512, int(len(formatted) * 1.2) + 200))
+            refined_raw = chat_completion_with_retry(
+                client,
+                [FORMAL_SPACING_FIX_MODEL],
+                messages=[
+                    {"role": "system", "content": formal_spacing_fix_instruction},
+                    {"role": "user", "content": formatted},
+                ],
+                temperature=0.0,
+                max_tokens=max_out,
+                timeout=90,
+            )
+            refined = force_single_line((refined_raw or "").strip().replace("-", " "))
+            refined = strip_special_chars(refined)
+            refined = force_single_line(refined)
+            if refined and len(refined) >= max(20, int(len(formatted) * 0.45)):
+                meta["spacingRefined"] = True
+                meta["spacingModel"] = FORMAL_SPACING_FIX_MODEL
+                print(
+                    f"[✅] Spacing refine OK ({len(formatted)} → {len(refined)} chars, "
+                    f"spaces {sc} → {refined.count(' ')})"
+                )
+                return (refined, meta)
+            print("[⚠️] Spacing refine: ผลลัพธ์สั้นผิดปกติ — ใช้ข้อความ formal เดิม")
+        except Exception as e:
+            print(f"[⚠️] Spacing refine failed: {e!r} — ใช้ข้อความ formal เดิม")
+        return (formatted, meta)
+
     def run_transcribe_chain(self, audio_b64: str) -> dict:
         with self._models_lock:
             audio_model = self.audio_model
@@ -1135,6 +1224,9 @@ class AITranscriberApp(AppUI, ctk.CTk):
         formatted = force_single_line((formatted_raw or "").strip().replace("-", " "))
         formatted = strip_special_chars(formatted)
         formatted = force_single_line(formatted)
+        formatted, spacing_meta = self._finalize_formatted_text(formatted)
+        if spacing_meta.get("spacingRefined"):
+            qc["formalSpacing"] = spacing_meta
 
         mod_raw = chat_completion_with_retry(
             client,
@@ -1325,8 +1417,12 @@ class AITranscriberApp(AppUI, ctk.CTk):
         formatted = force_single_line((formatted_raw or "").strip().replace("-", " "))
         formatted = strip_special_chars(formatted)
         formatted = force_single_line(formatted)
+        formatted, spacing_meta = self._finalize_formatted_text(formatted)
         _session_stats_record_formalize(time.time() - t0)
-        return {"status": "success", "text": formatted}
+        out: dict[str, Any] = {"status": "success", "text": formatted}
+        if spacing_meta.get("spacingRefined") or spacing_meta.get("reason"):
+            out["qc"] = {"formalSpacing": spacing_meta}
+        return out
 
     def run_transcribe_job(self, job_id: str, audio_b64: str) -> None:
         # Step-by-step, with checkpoints written to the job store.
@@ -1401,7 +1497,11 @@ class AITranscriberApp(AppUI, ctk.CTk):
             formatted = force_single_line((formatted_raw or "").strip().replace("-", " "))
             formatted = strip_special_chars(formatted)
             formatted = force_single_line(formatted)
-            _job_update(job_id, step="formatted", message="จัดข้อความเสร็จแล้ว", textLen=len(formatted))
+            formatted, spacing_meta = self._finalize_formatted_text(formatted)
+            msg = "จัดข้อความเสร็จแล้ว"
+            if spacing_meta.get("spacingRefined"):
+                msg += f" (แก้เว้นวรรคด้วย {spacing_meta.get('spacingModel', '')})"
+            _job_update(job_id, step="formatted", message=msg, textLen=len(formatted))
 
             _job_update(job_id, step="moderate", message="กำลังตรวจสอบความอ่อนไหวของเนื้อหา...")
             mod_raw = chat_completion_with_retry(
@@ -1416,6 +1516,8 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 timeout=30,
             )
             is_sensitive = parse_moderation_is_sensitive(mod_raw)
+            if spacing_meta.get("spacingRefined") or spacing_meta.get("reason"):
+                qc["formalSpacing"] = spacing_meta
             out = {"status": "success", "text": formatted, "isSensitive": is_sensitive, "qc": qc}
             _job_update(
                 job_id,

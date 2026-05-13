@@ -13,8 +13,7 @@ let minElapsedBeforeAcceptMs = Math.max(
     0,
     parseInt(localStorage.getItem("dingtag_min_elapsed_before_accept_ms") || "0", 10) || 0
 );
-let sensitiveFilterEnabled = localStorage.getItem("dingtag_sensitive_filter_enabled") !== "0";
-let nonTargetAutoInvalidEnabled = localStorage.getItem("dingtag_non_target_auto_invalid") !== "0";
+// บังคับใช้เสมอ: กรอง Sensitive + Non-target auto invalid (ไม่มี toggle ใน Settings)
 let autoSkipNoClassificationEnabled =
     localStorage.getItem("dingtag_auto_skip_no_classification") !== "0";
 let noClassificationTimeoutMs = Math.max(
@@ -76,6 +75,12 @@ let noTargetIdleSince = 0;     // timestamp เริ่มเห็น "ไม�
 let lastAutoFilterAt = 0;       // timestamp ครั้งล่าสุดที่ auto-filter ถูก trigger (cooldown)
 const NO_TARGET_AUTO_FILTER_AFTER_MS = 4000;  // ต้องไม่เจอ target ติดต่อกัน 4 วิ ก่อน trigger
 const AUTO_FILTER_COOLDOWN_MS = 30000;        // 30 วิ ระหว่าง trigger แต่ละครั้ง (กัน loop)
+
+// หลัง Order by (lumenTaskId): กดปุ่มเรียงทิศกี่ครั้ง — 1 = ท้ายก่อน, 2 = หัวก่อน (ปุ่มเดียวสลับ descending/ascending)
+let orderBySortDescendingClicks = Math.min(
+    2,
+    Math.max(1, parseInt(localStorage.getItem("dingtag_order_by_sort_desc_clicks") || "1", 10) || 1)
+);
 
 function clearAllTasks() {
     activeTimeouts.forEach(t => clearTimeout(t));
@@ -500,76 +505,6 @@ minAcceptSlider.title =
     "จากเริ่มงานแต่ละรอบถึงก่อนกด Accept ใช้เวลาอย่างน้อยเท่านี้ (ถ้างานเร็วเกินจะรอให้ครบ)";
 settingsContainer.appendChild(minAcceptSlider);
 
-const sensitiveRow = document.createElement("div");
-sensitiveRow.style.display = "flex";
-sensitiveRow.style.alignItems = "center";
-sensitiveRow.style.justifyContent = "space-between";
-sensitiveRow.style.gap = "8px";
-sensitiveRow.style.marginTop = "12px";
-settingsContainer.appendChild(sensitiveRow);
-
-const sensitiveLabel = document.createElement("label");
-sensitiveLabel.innerText = "🛡️ กรองเนื้อหา Sensitive";
-sensitiveLabel.style.fontSize = "12px";
-sensitiveLabel.style.cursor = "pointer";
-sensitiveRow.appendChild(sensitiveLabel);
-
-const sensitiveToggle = document.createElement("input");
-sensitiveToggle.type = "checkbox";
-sensitiveToggle.checked = sensitiveFilterEnabled;
-sensitiveToggle.style.cursor = "pointer";
-sensitiveToggle.title = "เปิด/ปิด การกันข้อความอ่อนไหว";
-sensitiveRow.appendChild(sensitiveToggle);
-
-sensitiveLabel.addEventListener("click", () => {
-    sensitiveToggle.checked = !sensitiveToggle.checked;
-    sensitiveToggle.dispatchEvent(new Event("change"));
-});
-
-sensitiveToggle.addEventListener("change", () => {
-    sensitiveFilterEnabled = sensitiveToggle.checked;
-    localStorage.setItem("dingtag_sensitive_filter_enabled", sensitiveFilterEnabled ? "1" : "0");
-    console.log(
-        "[DingTag] Sensitive filter:",
-        sensitiveFilterEnabled ? "ON (บล็อกข้อความ sensitive)" : "OFF (อนุญาตข้อความแม้ isSensitive=true)"
-    );
-});
-
-const nonTargetRow = document.createElement("div");
-nonTargetRow.style.display = "flex";
-nonTargetRow.style.alignItems = "center";
-nonTargetRow.style.justifyContent = "space-between";
-nonTargetRow.style.gap = "8px";
-nonTargetRow.style.marginTop = "10px";
-settingsContainer.appendChild(nonTargetRow);
-
-const nonTargetLabel = document.createElement("label");
-nonTargetLabel.innerText = "🌐 Auto Invalid (Non-Target)";
-nonTargetLabel.style.fontSize = "12px";
-nonTargetLabel.style.cursor = "pointer";
-nonTargetRow.appendChild(nonTargetLabel);
-
-const nonTargetToggle = document.createElement("input");
-nonTargetToggle.type = "checkbox";
-nonTargetToggle.checked = nonTargetAutoInvalidEnabled;
-nonTargetToggle.style.cursor = "pointer";
-nonTargetToggle.title = "เมื่อ API ตรวจว่า Non-Target → กด Invalid + Non-Target Language";
-nonTargetRow.appendChild(nonTargetToggle);
-
-nonTargetLabel.addEventListener("click", () => {
-    nonTargetToggle.checked = !nonTargetToggle.checked;
-    nonTargetToggle.dispatchEvent(new Event("change"));
-});
-
-nonTargetToggle.addEventListener("change", () => {
-    nonTargetAutoInvalidEnabled = nonTargetToggle.checked;
-    localStorage.setItem("dingtag_non_target_auto_invalid", nonTargetAutoInvalidEnabled ? "1" : "0");
-    console.log(
-        "[DingTag] Non-target auto-invalid:",
-        nonTargetAutoInvalidEnabled ? "ON" : "OFF"
-    );
-});
-
 const autoSkipRow = document.createElement("div");
 autoSkipRow.style.display = "flex";
 autoSkipRow.style.alignItems = "center";
@@ -703,6 +638,63 @@ autoResetInput.addEventListener("change", () => {
     localStorage.setItem("dingtag_auto_reset_history_enabled", autoResetHistoryEnabled ? "1" : "0");
     console.log("[DingTag] Auto-Reset History on Loop:", autoResetHistoryEnabled ? "ON" : "OFF");
 });
+
+// หลัง Order by: สวิตช์เล็ก — ปิด = ท้ายก่อน (Sort 1×), เปิด = หัวก่อน (Sort 2×)
+const orderBySortRow = document.createElement("div");
+orderBySortRow.style.display = "flex";
+orderBySortRow.style.alignItems = "center";
+orderBySortRow.style.justifyContent = "space-between";
+orderBySortRow.style.gap = "8px";
+orderBySortRow.style.marginTop = "10px";
+settingsContainer.appendChild(orderBySortRow);
+
+const orderBySortLabelWrap = document.createElement("div");
+orderBySortLabelWrap.style.display = "flex";
+orderBySortLabelWrap.style.flexDirection = "column";
+orderBySortLabelWrap.style.gap = "2px";
+orderBySortLabelWrap.style.flex = "1";
+orderBySortLabelWrap.style.minWidth = "0";
+orderBySortLabelWrap.style.cursor = "pointer";
+const orderBySortMainLbl = document.createElement("span");
+orderBySortMainLbl.style.fontSize = "12px";
+orderBySortMainLbl.style.color = "#ecf0f1";
+orderBySortMainLbl.textContent = "Order by → Sort";
+const orderBySortSubLbl = document.createElement("span");
+orderBySortSubLbl.style.fontSize = "10px";
+orderBySortSubLbl.style.opacity = "0.78";
+orderBySortSubLbl.style.lineHeight = "1.25";
+function syncOrderBySortSubLabel() {
+    orderBySortSubLbl.textContent =
+        orderBySortDescendingClicks === 2
+            ? "หัวก่อน — กดปุ่มเรียง 2 ครั้ง (desc/asc สลับ)"
+            : "ท้ายก่อน — กดปุ่มเรียง 1 ครั้ง";
+}
+syncOrderBySortSubLabel();
+orderBySortLabelWrap.appendChild(orderBySortMainLbl);
+orderBySortLabelWrap.appendChild(orderBySortSubLbl);
+
+const orderBySortSwitch = document.createElement("input");
+orderBySortSwitch.type = "checkbox";
+orderBySortSwitch.checked = orderBySortDescendingClicks === 2;
+orderBySortSwitch.style.cursor = "pointer";
+orderBySortSwitch.style.flexShrink = "0";
+orderBySortSwitch.style.transform = "scale(0.72)";
+orderBySortSwitch.style.transformOrigin = "center right";
+orderBySortSwitch.title = "ปิด: ท้ายก่อน (1×) — เปิด: หัวก่อน (2×) ปุ่มเดียวสลับ ascending/descending";
+orderBySortSwitch.addEventListener("change", () => {
+    orderBySortDescendingClicks = orderBySortSwitch.checked ? 2 : 1;
+    localStorage.setItem("dingtag_order_by_sort_desc_clicks", String(orderBySortDescendingClicks));
+    syncOrderBySortSubLabel();
+    console.log("[DingTag] Order-by Sort descending clicks =", orderBySortDescendingClicks);
+});
+orderBySortLabelWrap.addEventListener("click", (e) => {
+    if (e.target === orderBySortSwitch) return;
+    orderBySortSwitch.checked = !orderBySortSwitch.checked;
+    orderBySortSwitch.dispatchEvent(new Event("change"));
+});
+
+orderBySortRow.appendChild(orderBySortLabelWrap);
+orderBySortRow.appendChild(orderBySortSwitch);
 
 // ---- ตั้งค่า Auto-Filter (Annotators / Does not contain / <user>) — hotkey Shift+↑ ----
 // Toggle: เปิด/ปิด ฟีเจอร์ทั้งหมด
@@ -2960,6 +2952,164 @@ async function openSelectTypeAndChoose(triggerBtn, valueText, { timeoutMs = 5000
     return await clickOptionInPopover(popover, valueText, { timeoutMs });
 }
 
+/** รอเมนู Order by เปิด (listbox/menu/cmdk — ไม่ใช้ dialog ทั่วไปกันโดน Filters panel) */
+async function waitForOpenOrderByMenu(orderBtn, { timeoutMs = 5000 } = {}) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const ctrlId = orderBtn.getAttribute("aria-controls");
+        if (ctrlId) {
+            const byId = document.getElementById(ctrlId);
+            if (byId && byId.getAttribute("data-state") !== "closed") return byId;
+        }
+        const lb = document.querySelector(
+            '[role="listbox"][data-state="open"], [role="menu"][data-state="open"]'
+        );
+        if (lb) return lb;
+        const wrap = document.querySelector("[data-radix-popper-content-wrapper]");
+        if (wrap && wrap.querySelector('[role="option"], [cmdk-item]')) return wrap;
+        await delay(80);
+    }
+    return null;
+}
+
+/** ปุ่มสลับทิศเรียงคอลัมน์ — หลังคลิกแล้ว LS สลับ aria-label ระหว่าง Sort descending / Sort ascending */
+function findTaskListSortDirectionButton() {
+    return (
+        document.querySelector('button[aria-label="Sort descending"]') ||
+        document.querySelector('button[aria-label="Sort ascending"]')
+    );
+}
+
+/** รอจน aria-label ของปุ่มเรียงเปลี่ยน (หลังคลิกครั้งก่อน) หรือหมดเวลา */
+async function waitForSortButtonLabelFlip(prevLabel, { timeoutMs = 1500 } = {}) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const btn = findTaskListSortDirectionButton();
+        const lab = btn?.getAttribute("aria-label") || "";
+        if (btn && lab && lab !== prevLabel) return btn;
+        await delay(45);
+    }
+    return findTaskListSortDirectionButton();
+}
+
+/**
+ * หลัง apply filter สำเร็จ (best-effort): คลิก Order by → เลือก columnList.lumenTaskId → blur →
+ * กดปุ่มเรียงทิศตามตั้งค่า (1 ครั้ง = ท้ายก่อน, 2 ครั้ง = สลับอีกที = หัวก่อน) — รองรับปุ่มที่สลับ ascending/descending
+ * ไม่ throw — ถ้า UI ไม่พร้อมจะ log แล้วจบ (ไม่ทำให้ filter fail)
+ */
+async function runOrderByLumenTaskIdDescendingBestEffort() {
+    const STEP_MS = 450;
+    const BETWEEN_SORT_MS = 380;
+    const needle = "columnList.lumenTaskId";
+    const sortClicks = Math.min(2, Math.max(1, orderBySortDescendingClicks || 1));
+    try {
+        const orderBtn = findButtonByText(["Order by"], { exact: true });
+        if (!orderBtn) {
+            console.warn("[OrderBy] ไม่พบปุ่ม Order by — ข้าม");
+            return;
+        }
+        try {
+            orderBtn.scrollIntoView?.({ block: "center" });
+        } catch {}
+        setStatus(
+            sortClicks === 2
+                ? "Order by: เลือก Task ID → กดปุ่มเรียง 2 ครั้ง (หัวก่อน)…"
+                : "Order by: เลือก Task ID → กดปุ่มเรียง 1 ครั้ง (ท้ายก่อน)…"
+        );
+        orderBtn.click();
+        console.log("[OrderBy] คลิกปุ่ม Order by");
+        await delay(STEP_MS);
+
+        const menuRoot = await waitForOpenOrderByMenu(orderBtn, { timeoutMs: 5000 });
+        const searchRoots =
+            menuRoot && document.contains(menuRoot)
+                ? [menuRoot, document.body]
+                : [document.body];
+
+        const tryClickOption = () => {
+            const direct =
+                document.querySelector(
+                    '[cmdk-item][data-value="columnList.lumenTaskId"], ' +
+                        '[role="option"][data-value="columnList.lumenTaskId"]'
+                ) ||
+                document.querySelector('[data-value="columnList.lumenTaskId"]');
+            if (direct && document.contains(direct)) {
+                try {
+                    direct.scrollIntoView?.({ block: "nearest" });
+                } catch {}
+                direct.click();
+                return true;
+            }
+            for (const root of searchRoots) {
+                if (!root) continue;
+                const cand = root.querySelectorAll(
+                    '[role="option"], [cmdk-item], .lsf-space-dm_direction_horizontal, .lsf-space-dm'
+                );
+                for (const el of cand) {
+                    const raw = (el.textContent || "").replace(/\s+/g, " ").trim();
+                    if (!raw.includes(needle)) continue;
+                    const pick =
+                        el.closest('[role="option"]') ||
+                        el.closest("[cmdk-item]") ||
+                        el.closest("button") ||
+                        el;
+                    try {
+                        pick.scrollIntoView?.({ block: "nearest" });
+                    } catch {}
+                    pick.click();
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        let clicked = false;
+        const optDeadline = Date.now() + 5000;
+        while (Date.now() < optDeadline && !clicked) {
+            clicked = tryClickOption();
+            if (!clicked) await delay(100);
+        }
+        if (!clicked) {
+            console.warn("[OrderBy] ไม่พบรายการ", needle, "— ข้าม");
+        } else {
+            console.log("[OrderBy] เลือก", needle, "แล้ว");
+        }
+        await delay(STEP_MS);
+
+        blurAnyActiveElement();
+        try {
+            if (document.body && typeof document.body.focus === "function") {
+                document.body.focus();
+            }
+        } catch {}
+        await delay(220);
+
+        for (let i = 0; i < sortClicks; i++) {
+            const sortBtn = findTaskListSortDirectionButton();
+            if (!sortBtn) {
+                console.warn(
+                    "[OrderBy] ไม่พบปุ่ม Sort descending/ascending — หยุดที่ครั้งที่",
+                    i + 1
+                );
+                return;
+            }
+            const prevLabel = sortBtn.getAttribute("aria-label") || "";
+            try {
+                sortBtn.scrollIntoView?.({ block: "center" });
+            } catch {}
+            sortBtn.click();
+            console.log(`[OrderBy] คลิกเรียงทิศ ครั้งที่ ${i + 1}/${sortClicks} (${prevLabel})`);
+            if (i < sortClicks - 1) {
+                await delay(BETWEEN_SORT_MS);
+                await waitForSortButtonLabelFlip(prevLabel, { timeoutMs: 1800 });
+            }
+        }
+        await delay(STEP_MS);
+    } catch (e) {
+        console.warn("[OrderBy] error:", e?.name, e?.message);
+    }
+}
+
 /**
  * ตั้ง filter ทีละ step (ค่อย ๆ ทำ):
  *   1) คลิกปุ่ม Filters (เปิด panel)
@@ -3040,6 +3190,7 @@ async function applyMyAnnotatorFilter() {
             if (opOk && valOk) {
                 console.log(`✅ [Filter] มี filter ครบอยู่แล้ว — ไม่ต้องทำซ้ำ (Annotators ≠ ${username})`);
                 setStatus(`Filter already set: Annotators ≠ ${username}`);
+                await runOrderByLumenTaskIdDescendingBestEffort();
                 return true;
             }
 
@@ -3078,6 +3229,7 @@ async function applyMyAnnotatorFilter() {
 
             setStatus(`Filter applied (เติม): Annotators ≠ ${username}`);
             console.log(`✅ [Filter] เติมครบ — Annotators ≠ ${username}`);
+            await runOrderByLumenTaskIdDescendingBestEffort();
             return true;
         }
 
@@ -3233,6 +3385,7 @@ async function applyMyAnnotatorFilter() {
         await delay(200);
         console.log(`✅ [Filter] เสร็จครบทุก step! (Annotators ≠ ${username})`);
         setStatus(`Filter applied: Annotators ≠ ${username}`);
+        await runOrderByLumenTaskIdDescendingBestEffort();
         return true;
     } catch (e) {
         console.warn("[Filter] applyMyAnnotatorFilter error:", e?.name, e?.message, e);
@@ -3815,7 +3968,7 @@ setInterval(() => {
                             return;
                         }
 
-                        if (sensitiveFilterEnabled && data.isSensitive === true) {
+                        if (data.isSensitive === true) {
                             console.warn("⚠️ เนื้อหาอ่อนไหว (Politics/War/Monarchy) — ข้ามการวางข้อความ และคงค่าเดิมไว้");
                             setStatus("Sensitive — ส่ง invalid flow");
                             await runInvalidDataMissingAcceptFlow("Sensitive content", runToken, cycleStartAt);
@@ -3845,7 +3998,7 @@ setInterval(() => {
                             );
                         }
 
-                        if (nonTargetAutoInvalidEnabled && qc.isNonTarget === true) {
+                        if (qc.isNonTarget === true) {
                             const warnParts = [
                                 "⚠️ QC Non-Target — englishRatio:",
                                 qc.englishRatio,
@@ -3891,9 +4044,22 @@ setInterval(() => {
                             setStatus("Formal: ระบบ AI หยุดชั่วคราว");
                         } else {
                             const formatted = (formalResult.data || {}).text || "";
+                            const fqc = (formalResult.data || {}).qc || {};
+                            const fsp = fqc.formalSpacing;
+                            if (fsp && fsp.spacingRefined) {
+                                console.log(
+                                    "[DingTag] 📐 Formal spacing refined:",
+                                    fsp.spacingModel || "",
+                                    fsp.reason || ""
+                                );
+                            }
                             if (formatted && formatted.trim()) {
                                 safeSetTextarea(runToken, ta, formatted, "formal");
-                                setStatus("จัดคำแล้ว");
+                                setStatus(
+                                    fsp && fsp.spacingRefined
+                                        ? "จัดคำแล้ว (แก้เว้นวรรคถี่ด้วย Gemini)"
+                                        : "จัดคำแล้ว"
+                                );
                             } else {
                                 setStatus("จัดคำแล้ว (ผลลัพธ์ว่าง)");
                             }

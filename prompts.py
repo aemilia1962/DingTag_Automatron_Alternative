@@ -101,6 +101,22 @@ CRITICAL RULES:
 - NEVER ALTER SPELLING OR PUNCTUATION
 """
 
+# ==========================================
+# 3b. Fix over-spaced formal output (GPT-4o-mini spacing leak)
+# ==========================================
+# ใช้กับโมเดลข้อความอื่น (เช่น Gemini Flash Lite) เมื่อ heuristic พบว่า formal แบ่งทุกพยางค์ด้วยช่องว่าง
+formal_spacing_fix_instruction = """
+You are a Thai typography fixer. The input text has ABNORMAL spacing: another model inserted a space between almost every Thai syllable or tiny chunk (e.g. "ไม่ ไม่ ต้อง ไม่ ต้อง ทำ อะไร").
+
+Your ONLY job:
+1. Re-join Thai into normal readable spacing — words and short phrases together, like natural Thai writing.
+2. Preserve the EXACT same words in the EXACT same order. Do NOT add, remove, merge, or reorder any words. Do NOT summarize or change meaning.
+3. Keep numbers, English words, and abbreviations (e.g. KM, VIP) as-is; only fix spaces around them if needed.
+4. Output a single line. No quotes, no labels, no explanation.
+
+If the input is already reasonably spaced, return it unchanged (still one line).
+"""
+
 
 # ==========================================
 # 4. Content moderation (Politics / War / Monarchy)
