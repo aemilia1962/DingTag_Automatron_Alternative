@@ -527,7 +527,8 @@ FORMAL_SPACING_FIX_MODEL = "google/gemini-2.5-flash-lite"
 # ถ้ายังหลอนอีก → ใช้ผลลัพธ์ล่าสุดและทำขั้นตอนต่อไปตามปกติ
 HALLUCINATION_FALLBACK_MODEL = "google/gemini-2.5-flash"
 # Thresholds สำหรับ flag "หลอน": ขึ้นกับความยาวของ "หน่วยที่ซ้ำ" (unit)
-HALLUCINATION_MAX_UNIT_LEN = 15      # unit ยาวเกินนี้ไม่ถือว่าเป็น repetition แล้ว
+# วลีไทยซ้ำ (เช่น "บ้านปูเป็นยังไง " ≈ 16 โค้ดพอยต์) ต้องให้ unit ยาวพอ — เดิม 15 ทำให้พลาดลูปยาว
+HALLUCINATION_MAX_UNIT_LEN = 72      # unit ยาวเกินนี้ไม่ถือว่าเป็น repetition แล้ว
 HALLUCINATION_TINY_UNIT_MAX = 2      # unit 1-2 ตัวอักษร
 HALLUCINATION_TINY_REPS = 10         #   → flag เมื่อซ้ำ >= 10 รอบ
 HALLUCINATION_SHORT_UNIT_MAX = 6     # unit 3-6 ตัวอักษร
@@ -1441,8 +1442,13 @@ class AITranscriberApp(AppUI, ctk.CTk):
         formatted, spacing_meta = self._finalize_formatted_text(formatted)
         _session_stats_record_formalize(time.time() - t0)
         out: dict[str, Any] = {"status": "success", "text": formatted}
+        qc_out: dict[str, Any] = {}
         if spacing_meta.get("spacingRefined") or spacing_meta.get("reason"):
-            out["qc"] = {"formalSpacing": spacing_meta}
+            qc_out["formalSpacing"] = spacing_meta
+        hallu_formal: dict[str, Any] = {}
+        stamp_final_hallucination_meta(hallu_formal, formatted)
+        qc_out["hallucination"] = hallu_formal
+        out["qc"] = qc_out
         return out
 
     def run_transcribe_job(self, job_id: str, audio_b64: str) -> None:

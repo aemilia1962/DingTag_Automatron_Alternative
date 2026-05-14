@@ -4111,6 +4111,23 @@ setInterval(() => {
                                 );
                             }
                             if (formatted && formatted.trim()) {
+                                const fHallu = (fqc.hallucination || {}).stillHallucinated === true;
+                                if (fHallu) {
+                                    const fh = fqc.hallucination || {};
+                                    const fu = fh.finalUnit || fh.unit || "";
+                                    const fr = fh.finalReps ?? fh.reps ?? 0;
+                                    console.warn(
+                                        `[DingTag] คำซ้ำหลังจัดคำ (unit='${fu}'×${fr}) — วางข้อความแล้วส่ง Invalid (Data Missing)`
+                                    );
+                                    setStatus("คำซ้ำหลังจัดคำ — ส่ง Data Missing");
+                                    safeSetTextarea(runToken, ta, formatted, "formal → invalid (repetition)");
+                                    await runInvalidDataMissingAcceptFlow(
+                                        "Repetitive text after formalize / data missing",
+                                        runToken,
+                                        cycleStartAt
+                                    );
+                                    return;
+                                }
                                 safeSetTextarea(runToken, ta, formatted, "formal");
                                 setStatus(
                                     fsp && fsp.spacingRefined
