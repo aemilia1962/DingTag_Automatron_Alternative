@@ -257,6 +257,14 @@ async function postTranscribe(audioBase64) {
         "source:",
         qc.nonTargetSource,
     ];
+    if (qc.longSilence) {
+        logParts.push(
+            "| longSilence:",
+            qc.longSilence.trigger,
+            "longestRunSec:",
+            qc.longSilence.longestRunSec
+        );
+    }
     if (qc.foreignScript) {
         logParts.push(
             "| foreignScript:",
@@ -4198,14 +4206,28 @@ setInterval(() => {
                             return;
                         }
 
+                        const qc = data.qc || {};
+                        const longSil = qc.longSilence;
+                        if (longSil && longSil.trigger === true) {
+                            console.warn(
+                                `[DingTag] ช่วงเงียบ/พลังงานต่ำต่อเนื่อง ${longSil.longestRunSec}s (เกณฑ์ ${longSil.thresholdSec}s) → Invalid Data Missing`
+                            );
+                            setStatus("เงียบ/ไม่มีเสียงพูดต่อเนื่องเกิน 2.5 วิ — ส่ง Data Missing");
+                            await runInvalidDataMissingAcceptFlow(
+                                "Long silence / low-energy segment (>=2.5s)",
+                                runToken,
+                                cycleStartAt,
+                                pipelineTaskId
+                            );
+                            return;
+                        }
+
                         if (data.isSensitive === true) {
                             console.warn("⚠️ เนื้อหาอ่อนไหว (Politics/War/Monarchy) — ข้ามการวางข้อความ และคงค่าเดิมไว้");
                             setStatus("Sensitive — ส่ง invalid flow");
                             await runInvalidDataMissingAcceptFlow("Sensitive content", runToken, cycleStartAt, pipelineTaskId);
                             return;
                         }
-
-                        const qc = data.qc || {};
 
                         // Hallucination guard log — ถ้า Python server ลอง fallback model มา ให้ผู้ใช้เห็นใน log/status
                         const halu = qc.hallucination || {};

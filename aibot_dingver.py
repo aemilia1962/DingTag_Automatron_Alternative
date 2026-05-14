@@ -1,8 +1,12 @@
 import os
 import re
+import io
 import sys
 import json
+import math
 import time
+import wave
+import struct
 import base64
 import random
 import threading
@@ -304,6 +308,127 @@ def _is_probably_wav(raw: bytes) -> bool:
     return raw[0:4] == b"RIFF" and raw[8:12] == b"WAVE"
 
 
+# ช่วงเงียบ / พลังงานต่ำต่อเนื่องยาวเกินค่านี้ → ส่ง qc.longSilence.trigger (ให้ Extension ไป Invalid Data Missing)
+LONG_SILENCE_TRIGGER_SEC = 2.5
+# ความละเอียดวิเคราะห์ RMS ต่อก้อน (วินาที)
+_SILENCE_FRAME_SEC = 0.05
+# RMS ต่อก้อน int16: ถือว่า "เงียบ" ถ้าต่ำกว่า max(พื้นสัมบูรณ์, สัดส่วนของ peak ในไฟล์)
+_SILENCE_ABS_RMS = 80.0
+_SILENCE_REL_TO_PEAK = 0.06
+
+
+def analyze_wav_longest_silence_run_seconds(raw_bytes: bytes) -> tuple[float, dict[str, Any]]:
+    """ประเมินความยาว (วินาที) ของช่วงที่พลังงานต่ำต่อเนื่องยาวที่สุดใน WAV PCM 16-bit
+
+    ใช้ RMS ต่อก้อน ~50ms; ก้อนถือว่าเงียบถ้า RMS < max(_SILENCE_ABS_RMS, _SILENCE_REL_TO_PEAK * peak_rms)
+    คืน (longest_run_seconds, meta) — ถ้า parse ไม่ได้ meta['ok']=False (ไม่ trigger ฝั่ง caller)
+    """
+    meta: dict[str, Any] = {"ok": False, "reason": "init"}
+    if not raw_bytes or len(raw_bytes) < 44:
+        meta["reason"] = "too_short"
+        return 0.0, meta
+    try:
+        bio = io.BytesIO(raw_bytes)
+        with wave.open(bio, "rb") as wf:
+            if wf.getcomptype() != "NONE":
+                meta["reason"] = f"comptype_{wf.getcomptype()}"
+                return 0.0, meta
+            sw = wf.getsampwidth()
+            ch = wf.getnchannels()
+            rate = wf.getframerate()
+            if sw != 2 or ch < 1 or ch > 8:
+                meta["reason"] = f"unsupported_sw{sw}_ch{ch}"
+                return 0.0, meta
+            if rate <= 0:
+                meta["reason"] = "bad_rate"
+                return 0.0, meta
+            frames_bytes = wf.readframes(wf.getnframes())
+    except Exception as e:
+        meta["reason"] = f"wave_error:{e}"
+        return 0.0, meta
+
+    group_bytes = sw * ch
+    nbytes = (len(frames_bytes) // group_bytes) * group_bytes
+    if nbytes < group_bytes:
+        meta["ok"] = True
+        meta["reason"] = "no_samples"
+        return 0.0, meta
+
+    n_groups = nbytes // group_bytes
+    fmt = "<" + str(n_groups * ch) + "h"
+    try:
+        flat = struct.unpack(fmt, frames_bytes[:nbytes])
+    except struct.error as e:
+        meta["reason"] = f"unpack:{e}"
+        return 0.0, meta
+
+    mono: list[float] = []
+    for i in range(n_groups):
+        base = i * ch
+        s = 0.0
+        for c in range(ch):
+            s += float(flat[base + c])
+        mono.append(s / float(ch))
+
+    frame_n = max(1, int(round(float(rate) * _SILENCE_FRAME_SEC)))
+    frame_rms: list[float] = []
+    for start in range(0, len(mono), frame_n):
+        chunk = mono[start : start + frame_n]
+        if not chunk:
+            break
+        acc = sum(x * x for x in chunk) / float(len(chunk))
+        frame_rms.append(math.sqrt(acc))
+
+    if not frame_rms:
+        meta["ok"] = True
+        meta["reason"] = "no_frames"
+        return 0.0, meta
+
+    peak_rms = max(frame_rms) or 1e-9
+    thresh = max(_SILENCE_ABS_RMS, _SILENCE_REL_TO_PEAK * peak_rms)
+    silent_flags = [rms < thresh for rms in frame_rms]
+
+    longest = 0
+    cur = 0
+    for flag in silent_flags:
+        if flag:
+            cur += 1
+            if cur > longest:
+                longest = cur
+        else:
+            cur = 0
+
+    frame_dur = frame_n / float(rate)
+    longest_sec = longest * frame_dur
+    meta["ok"] = True
+    meta["reason"] = "computed"
+    meta["peakRms"] = round(peak_rms, 2)
+    meta["thresholdRms"] = round(thresh, 2)
+    meta["frameDurSec"] = round(frame_dur, 4)
+    meta["numFrames"] = len(frame_rms)
+    return longest_sec, meta
+
+
+def _response_long_silence_data_missing(longest_sec: float, silence_meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "success",
+        "text": "",
+        "isSensitive": False,
+        "qc": {
+            "isNonTarget": False,
+            "englishRatio": 0.0,
+            "nonTargetSource": "none",
+            "hallucination": {},
+            "longSilence": {
+                "trigger": True,
+                "longestRunSec": round(float(longest_sec), 3),
+                "thresholdSec": LONG_SILENCE_TRIGGER_SEC,
+                "meta": silence_meta,
+            },
+        },
+    }
+
+
 @fastapi_app.post("/api/transcribe")
 def api_transcribe(body: TranscribeRequest):
     inst = _transcriber_instance
@@ -330,9 +455,11 @@ def api_transcribe(body: TranscribeRequest):
         # Step 1 (for Extension): transcribe + basic clean + moderate only (no formalize yet)
         out = inst.run_transcribe_then_moderate(body.audioBase64)
         qc = out.get("qc") or {}
+        ls = qc.get("longSilence") or {}
         print(
             f"[API] สำเร็จ — isSensitive={out.get('isSensitive')} "
             f"nonTarget={qc.get('isNonTarget')} englishRatio={qc.get('englishRatio')} "
+            f"longSilence={ls.get('trigger')} longestRun={ls.get('longestRunSec')} "
             f"ความยาวข้อความ={len((out.get('text') or ''))}"
         )
         return out
@@ -1383,6 +1510,15 @@ class AITranscriberApp(AppUI, ctk.CTk):
         if not _is_probably_wav(raw_bytes):
             print("[API] ⚠️ ไฟล์เสียงอาจไม่ใช่ WAV (RIFF/WAVE header ไม่ตรง)")
 
+        silence_sec, silence_meta = analyze_wav_longest_silence_run_seconds(raw_bytes)
+        if silence_meta.get("ok") and silence_sec >= LONG_SILENCE_TRIGGER_SEC:
+            print(
+                f"[API] ช่วงเงียบ/พลังงานต่ำต่อเนื่อง {silence_sec:.2f}s ≥ {LONG_SILENCE_TRIGGER_SEC}s "
+                "→ ข้าม ASR, ส่ง longSilence (Data Missing)"
+            )
+            _session_stats_record_transcribe(time.time() - t0)
+            return _response_long_silence_data_missing(silence_sec, silence_meta)
+
         b64_clean = base64.b64encode(raw_bytes).decode("ascii")
         prompt_rules = DINGTALK_PROMPT + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
         result_text, hallu_meta = self._transcribe_with_hallucination_guard(
@@ -1498,6 +1634,22 @@ class AITranscriberApp(AppUI, ctk.CTk):
             )
             if not _is_probably_wav(raw_bytes):
                 _job_update(job_id, step="validated", message="ตรวจสอบเสียงแล้ว (แต่ header WAV ไม่ตรง)")
+
+            silence_sec, silence_meta = analyze_wav_longest_silence_run_seconds(raw_bytes)
+            if silence_meta.get("ok") and silence_sec >= LONG_SILENCE_TRIGGER_SEC:
+                out = _response_long_silence_data_missing(silence_sec, silence_meta)
+                _job_update(
+                    job_id,
+                    status="success",
+                    step="done",
+                    message=f"ช่วงเงียบยาว {silence_sec:.1f}s — ข้าม ASR (Data Missing)",
+                    finishedAt=time.time(),
+                    result=out,
+                    isSensitive=False,
+                    textLen=0,
+                )
+                _session_stats_record_transcribe(time.time() - t0)
+                return
 
             with self._models_lock:
                 audio_model = self.audio_model
