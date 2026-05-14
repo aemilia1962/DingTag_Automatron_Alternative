@@ -133,6 +133,7 @@ from prompts import (
     formal_instruction,
     formal_spacing_fix_instruction,
     CONTENT_MODERATION_PROMPT,
+    CONTENT_MODERATION_RECHECK_PROMPT,
     NON_TARGET_LANGUAGE_PROMPT,
 )
 from aibot_gui import AppUI
@@ -803,13 +804,64 @@ def chat_completion_with_retry(
     raise last_err if last_err else RuntimeError("Unknown connection failure")
 
 
-def parse_moderation_is_sensitive(content: str) -> bool:
-    """True = sensitive (YES). Ambiguous → True (fail closed)."""
+_MODERATION_STRICT_USER_SUFFIX = "\n\nOutput only YES or NO."
+
+
+def _parse_moderation_yes_no(content: str) -> bool | None:
+    """True = YES, False = NO, None = no clear YES/NO token."""
     t = (content or "").strip().upper()
     m = re.search(r"\b(YES|NO)\b", t)
     if m:
         return m.group(1) == "YES"
-    return True
+    return None
+
+
+def classify_content_sensitive_with_moderation(text: str) -> bool:
+    """Primary moderation + optional recheck on YES; retry once if parse fails.
+
+    Unparseable primary output after retry → not sensitive (avoid blocking on bad API output).
+    Primary YES + recheck NO → not sensitive (sports/business false positive).
+    Recheck unparseable after retry → not sensitive + log (same fail-open for format issues).
+    """
+    user = (text or "").strip()
+    if not user:
+        return False
+
+    def _call(system: str, user_content: str) -> str:
+        return chat_completion_with_retry(
+            client,
+            [MODERATION_MODEL],
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.0,
+            max_tokens=16,
+            timeout=30,
+        )
+
+    raw = _call(CONTENT_MODERATION_PROMPT, user)
+    parsed = _parse_moderation_yes_no(raw)
+    if parsed is None:
+        raw = _call(CONTENT_MODERATION_PROMPT, user + _MODERATION_STRICT_USER_SUFFIX)
+        parsed = _parse_moderation_yes_no(raw)
+    if parsed is None:
+        snippet = (raw or "").replace("\n", " ")[:120]
+        print(f"[moderation] ไม่ parse ได้ YES/NO หลัง retry — ถือว่าไม่ sensitive | raw≈{snippet!r}")
+        return False
+    if not parsed:
+        return False
+
+    raw2 = _call(CONTENT_MODERATION_RECHECK_PROMPT, user)
+    parsed2 = _parse_moderation_yes_no(raw2)
+    if parsed2 is None:
+        raw2 = _call(CONTENT_MODERATION_RECHECK_PROMPT, user + _MODERATION_STRICT_USER_SUFFIX)
+        parsed2 = _parse_moderation_yes_no(raw2)
+    if parsed2 is None:
+        snippet = (raw2 or "").replace("\n", " ")[:120]
+        print(f"[moderation] recheck ไม่ parse ได้ YES/NO หลัง retry — ถือว่าไม่ sensitive | raw≈{snippet!r}")
+        return False
+    return bool(parsed2)
 
 
 def parse_non_target_is_yes(content: str) -> bool:
@@ -1250,18 +1302,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         if spacing_meta.get("spacingRefined"):
             qc["formalSpacing"] = spacing_meta
 
-        mod_raw = chat_completion_with_retry(
-            client,
-            [MODERATION_MODEL],
-            messages=[
-                {"role": "system", "content": CONTENT_MODERATION_PROMPT},
-                {"role": "user", "content": formatted},
-            ],
-            temperature=0.0,
-            max_tokens=16,
-            timeout=30,
-        )
-        is_sensitive = parse_moderation_is_sensitive(mod_raw)
+        is_sensitive = classify_content_sensitive_with_moderation(formatted)
 
         return {
             "status": "success",
@@ -1271,18 +1312,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         }
 
     def _moderate_text(self, text: str) -> bool:
-        mod_raw = chat_completion_with_retry(
-            client,
-            [MODERATION_MODEL],
-            messages=[
-                {"role": "system", "content": CONTENT_MODERATION_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            temperature=0.0,
-            max_tokens=16,
-            timeout=30,
-        )
-        return parse_moderation_is_sensitive(mod_raw)
+        return classify_content_sensitive_with_moderation(text)
 
     def _classify_non_target_qc(self, result_text: str) -> dict[str, Any]:
         """Detect non-Central-Thai content (regional Thai dialects + foreign languages).
@@ -1531,18 +1561,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
             _job_update(job_id, step="formatted", message=msg, textLen=len(formatted))
 
             _job_update(job_id, step="moderate", message="กำลังตรวจสอบความอ่อนไหวของเนื้อหา...")
-            mod_raw = chat_completion_with_retry(
-                client,
-                [MODERATION_MODEL],
-                messages=[
-                    {"role": "system", "content": CONTENT_MODERATION_PROMPT},
-                    {"role": "user", "content": formatted},
-                ],
-                temperature=0.0,
-                max_tokens=16,
-                timeout=30,
-            )
-            is_sensitive = parse_moderation_is_sensitive(mod_raw)
+            is_sensitive = classify_content_sensitive_with_moderation(formatted)
             if spacing_meta.get("spacingRefined") or spacing_meta.get("reason"):
                 qc["formalSpacing"] = spacing_meta
             out = {"status": "success", "text": formatted, "isSensitive": is_sensitive, "qc": qc}

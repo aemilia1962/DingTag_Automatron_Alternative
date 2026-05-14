@@ -123,7 +123,7 @@ If the input is already reasonably spaced, return it unchanged (still one line).
 # ==========================================
 CONTENT_MODERATION_PROMPT = """
 You are a smart content classifier. Your task is to decide whether the user's text mentions or clearly alludes to REAL-WORLD sensitive topics:
-- REAL-WORLD Politics (elections, parties, political figures,USA China)
+- REAL-WORLD Politics (elections, governments, parties, legislation, geopolitical disputes between states, protests aimed at the state, named real-world political leaders / officials)
 - REAL-WORLD War & Armed Conflict (e.g., Israel-Hamas, Russia-Ukraine, real military operations, real war events)
 - REAL-WORLD Monarchy (kings, queens, royal institutions)
 
@@ -132,11 +132,33 @@ Answer with exactly one token: YES or NO.
 CRITICAL EXCEPTIONS (When to answer NO):
 - FICTIONAL CONTEXTS: If the text is clearly about video games, RPG lore, fantasy, sci-fi, movies, or storytelling (e.g., "War in Hell", "demons", "game mechanics", fictional factions, magic), you MUST answer NO.
 - Historical education without current political provocation.
+- SPORTS & ATHLETICS: Professional or amateur sports, football/soccer (e.g. transfers, transfer fees in pounds/euros/dollars, clubs like Manchester United or Chelsea, players, managers, leagues, matches, contracts, dissatisfaction with a fee or deal) — including Thai phrasing such as "ย้ายทีม", "ค่าตัว", "สโมสร", "ดีล", "การเจรจา" — even if money, negotiations, or disagreement appear, you MUST answer NO. Sports is NOT politics.
+- CLUB NAMES VS GEOPOLITICS: "United" in Manchester United / Man Utd / แมนเชสเตอร์ยูไนเต็ด / "ยูไนเต็ด" as a football club is NOT the United States and NOT geopolitics. The same applies to other club nicknames and sports contexts.
+- General entertainment news (music, film awards, celebrities) unrelated to politics, war, or monarchy as defined above → NO.
+- BUSINESS / MONEY / CONSUMER NEWS: prices, deals, negotiations, salaries in a corporate, sports, or celebrity context without government or partisan politics — answer NO.
 
 Rules:
 - Output ONLY the letters YES or NO. No punctuation, no spaces, no explanation.
 - If it is real-world sensitive, answer YES.
-- If it is fiction, gaming, or fantasy, answer NO.
+- If it is fiction, gaming, fantasy, sports, or ordinary business/entertainment economics without sensitive topics above, answer NO.
+"""
+
+# Second pass when the primary classifier returned YES — reduces false positives (e.g. sports mis-tagged).
+CONTENT_MODERATION_RECHECK_PROMPT = """
+A first-pass classifier may have marked this text as sensitive (real-world politics, war, or monarchy). Re-read the whole text.
+
+Answer YES only if the passage still clearly discusses REAL-WORLD sensitive topics:
+- Politics: elections, governments, parties, legislation, interstate geopolitical disputes, protests aimed at the state, named real-world political leaders or officials.
+- War or armed conflict involving real states or groups.
+- Real-world monarchy (royal institutions, reigning royals as political/public figures).
+
+Answer NO if the text is ONLY about one or more of the following, without the sensitive topics above:
+- Sports & athletics: transfers, transfer fees in any currency, clubs (e.g. Manchester United, Chelsea), players, managers, leagues, matches, contracts, "ย้ายทีม", "ค่าตัว", "สโมสร", "ดีล", negotiation delays in a sports transfer context.
+- CLUB NAMES VS GEOPOLITICS: "United" / "ยูไนเต็ด" meaning Manchester United / แมนเชสเตอร์ยูไนเต็ด / Man Utd is NOT the United States and NOT geopolitics.
+- Ordinary business, consumer prices, salaries, or workplace negotiations unrelated to partisan politics or war.
+- Entertainment unrelated to politics, war, or monarchy.
+
+Output ONLY the letters YES or NO. No punctuation, no spaces, no explanation.
 """
 
 # ==========================================
