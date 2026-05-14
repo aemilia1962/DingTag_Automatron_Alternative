@@ -2525,8 +2525,70 @@ async function runInvalidNonTargetLanguageAcceptFlow(reasonText = "non-target la
 }
 
 /**
- * Flow ใหม่: เจอ Classification = Invalid → กด Esc → Optimized → Has Errors → กด Update
- * (แทนพฤติกรรมเดิมที่ Shift+↓ ข้ามทั้งงาน)
+ * คลิกตัวเลือก Classification ที่ข้อความตรงกับ `exactLower` แบบทั้งคำ
+ * (หลีกเลี่ยง substring: "invalid".includes("valid") === true)
+ */
+function clickExactClassificationChoice(exactLower) {
+    const want = String(exactLower).toLowerCase();
+    const candidates = document.querySelectorAll(
+        '[role="option"], [role="menuitem"], .ant-select-item-option-content, .ant-select-item, li.lsf-label, button'
+    );
+    for (const el of candidates) {
+        const raw = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        if (!raw || raw.length > 48) continue;
+        if (raw.toLowerCase() !== want) continue;
+        const clickable =
+            el.closest?.(
+                'button, [role="button"], [role="menuitem"], [role="option"], .ant-select-item, li'
+            ) || el;
+        try {
+            clickable.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+        try {
+            clickable.click();
+            const parentBtn = clickable.closest?.('button, [role="button"]');
+            if (parentBtn && parentBtn !== clickable) parentBtn.click();
+            return true;
+        } catch (e) {
+            console.warn("[DingTag] clickExactClassificationChoice:", e?.name, e?.message);
+        }
+    }
+    return false;
+}
+
+/**
+ * เมื่ออ่าน Classification = Invalid: พยายามเปิดตัวเลือกแล้วคลิก "Valid"
+ * จากนั้น autopilot รัน pipeline ถอดเสียง + QC ตามเดิม — ถ้า API บอก sensitive / non-target ฯลฯ
+ * ค่อยส่ง Invalid flow ตามโปรแกรม (ไม่ใช้ Esc → Optimized → Has Errors ตั้งแต่ต้น)
+ */
+async function switchClassificationInvalidToValid(runToken) {
+    const tryValid = () => {
+        if (clickExactClassificationChoice("valid")) return true;
+        if (forceClickByText(["Valid"])) return true;
+        return false;
+    };
+
+    for (let attempt = 1; attempt <= 4; attempt++) {
+        if (!isRunActive(runToken)) return false;
+        if (tryValid()) {
+            await delay(500);
+            return true;
+        }
+        const row = findClassificationResultRow();
+        const valEl = row?.querySelector(".lsf-annotation-items__result-value");
+        try {
+            valEl?.click();
+        } catch {}
+        await delay(400);
+    }
+    console.warn("[DingTag] ⚠️ สลับ Classification → Valid ไม่สำเร็จ — ยังรัน pipeline ถอดเสียงต่อ");
+    setStatus("เตือน: คลิก Valid ไม่สำเร็จ — ลองถอดเสียงต่อ");
+    return false;
+}
+
+/**
+ * Flow เดิม: เจอ Classification = Invalid → Esc → Optimized → Has Errors → Update
+ * (ไม่ถูกเรียกจาก autopilot หลักอีกต่อไป — เก็บไว้เผื่ออ้างอิง/นำกลับมาใช้)
  *
  * ขั้นตอน:
  *  1) ส่ง Escape เพื่อปิด popup/dropdown ที่อาจค้างอยู่
@@ -3964,9 +4026,13 @@ setInterval(() => {
                     if (!isRunActive(runToken)) return;
 
                     if (classificationValue === "invalid") {
-                        console.log("⚡ Classification = Invalid -> Esc → Optimized → Has Errors → Update");
-                        await runInvalidToVerifiedFlow(runToken, cycleStartAt);
-                        return;
+                        console.log(
+                            "⚡ Classification = Invalid → สลับเป็น Valid แล้วรัน pipeline (คัดกรองด้วย API)"
+                        );
+                        setStatus("Invalid → Valid แล้วถอดเสียง...");
+                        await switchClassificationInvalidToValid(runToken);
+                        await delay(450);
+                        if (!isRunActive(runToken)) return;
                     }
 
                     let ta = await waitForSelector('textarea[name="Annotation Result"]', {
