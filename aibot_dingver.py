@@ -139,6 +139,7 @@ from prompts import (
     CONTENT_MODERATION_PROMPT,
     CONTENT_MODERATION_RECHECK_PROMPT,
     NON_TARGET_LANGUAGE_PROMPT,
+    AUDIO_QUALITY_QC_PROMPT,
 )
 from aibot_gui import AppUI
 
@@ -429,6 +430,28 @@ def _response_long_silence_data_missing(longest_sec: float, silence_meta: dict[s
     }
 
 
+def _response_audio_quality_bad(
+    category: str, hallu_meta: dict[str, Any], llm_raw: str = ""
+) -> dict[str, Any]:
+    """คืน payload ให้ Extension ไป Invalid Data Missing (noise / ไม่มีเสียงพูด / ฟังไม่ออก) ตาม AI QC"""
+    return {
+        "status": "success",
+        "text": "",
+        "isSensitive": False,
+        "qc": {
+            "isNonTarget": False,
+            "englishRatio": 0.0,
+            "nonTargetSource": "none",
+            "hallucination": hallu_meta or {},
+            "audioQuality": {
+                "trigger": True,
+                "category": category,
+                "llmRaw": (llm_raw or "")[:400],
+            },
+        },
+    }
+
+
 @fastapi_app.post("/api/transcribe")
 def api_transcribe(body: TranscribeRequest):
     inst = _transcriber_instance
@@ -456,10 +479,12 @@ def api_transcribe(body: TranscribeRequest):
         out = inst.run_transcribe_then_moderate(body.audioBase64)
         qc = out.get("qc") or {}
         ls = qc.get("longSilence") or {}
+        aq = qc.get("audioQuality") or {}
         print(
             f"[API] สำเร็จ — isSensitive={out.get('isSensitive')} "
             f"nonTarget={qc.get('isNonTarget')} englishRatio={qc.get('englishRatio')} "
             f"longSilence={ls.get('trigger')} longestRun={ls.get('longestRunSec')} "
+            f"audioQuality={aq.get('trigger')} cat={aq.get('category')} "
             f"ความยาวข้อความ={len((out.get('text') or ''))}"
         )
         return out
@@ -1000,6 +1025,70 @@ def parse_non_target_is_yes(content: str) -> bool:
     return False
 
 
+def parse_audio_quality_verdict(content: str) -> str:
+    """คืน OK | BAD_NOISE | BAD_NO_SPEECH | BAD_UNINTELLIGIBLE | UNKNOWN"""
+    t = (content or "").strip().upper()
+    line0 = t.split("\n")[0].strip() if t else ""
+    joined = re.sub(r"\s+", " ", t)
+    for code in ("BAD_NOISE", "BAD_NO_SPEECH", "BAD_UNINTELLIGIBLE"):
+        if code in joined or code in line0:
+            return code
+    tok = line0.split()[0] if line0 else ""
+    if tok in ("BAD_NOISE", "BAD_NO_SPEECH", "BAD_UNINTELLIGIBLE"):
+        return tok
+    if tok == "OK" or line0.startswith("OK"):
+        return "OK"
+    return "UNKNOWN"
+
+
+def classify_transcript_audio_quality_qc(transcript: str) -> dict[str, Any]:
+    """LLM ดูข้อความถอดเสียงว่า noise / ไม่มีเสียงพูด / ฟังไม่ออก → trigger Invalid Data Missing
+
+    ข้อความว่าง: ไม่เรียก LLM (BAD_NO_SPEECH)
+    LLM error / parse ไม่ได้: fail-open → ไม่ trigger
+    """
+    out: dict[str, Any] = {
+        "trigger": False,
+        "category": "OK",
+        "source": "llm",
+        "llmRaw": "",
+    }
+    tr = (transcript or "").strip()
+    if not tr:
+        out["trigger"] = True
+        out["category"] = "BAD_NO_SPEECH"
+        out["source"] = "heuristic_empty"
+        return out
+
+    snippet = tr[:8000]
+    try:
+        raw = chat_completion_with_retry(
+            client,
+            [MODERATION_MODEL],
+            messages=[
+                {"role": "system", "content": AUDIO_QUALITY_QC_PROMPT},
+                {"role": "user", "content": "TRANSCRIPT:\n" + snippet},
+            ],
+            temperature=0.0,
+            max_tokens=32,
+            timeout=45,
+        )
+    except Exception as e:
+        print(f"[audio_qc] LLM error: {e!r} — fail-open (OK)")
+        out["source"] = "llm_error"
+        out["llmRaw"] = str(e)[:200]
+        return out
+
+    out["llmRaw"] = (raw or "").strip()[:400]
+    code = parse_audio_quality_verdict(raw or "")
+    if code.startswith("BAD_"):
+        out["trigger"] = True
+        out["category"] = code
+    else:
+        out["category"] = "OK" if code == "UNKNOWN" else code
+    return out
+
+
 def latin_vs_thai_letter_ratio(text: str) -> float:
     """Share of Latin letters among (Latin + Thai) letters. 0.0 if no such letters."""
     if not text:
@@ -1525,19 +1614,18 @@ class AITranscriberApp(AppUI, ctk.CTk):
             audio_model, b64_clean, prompt_rules
         )
 
-        if not result_text:
+        aq = classify_transcript_audio_quality_qc(result_text or "")
+        if aq.get("trigger"):
+            print(
+                f"[API] audioQuality ({aq.get('source')}) → {aq.get('category')} "
+                "— Invalid Data Missing path, skip moderation"
+            )
             _session_stats_record_transcribe(time.time() - t0)
-            return {
-                "status": "success",
-                "text": "",
-                "isSensitive": False,
-                "qc": {
-                    "isNonTarget": False,
-                    "englishRatio": 0.0,
-                    "nonTargetSource": "none",
-                    "hallucination": hallu_meta,
-                },
-            }
+            return _response_audio_quality_bad(
+                str(aq.get("category") or "BAD_UNINTELLIGIBLE"),
+                hallu_meta,
+                str(aq.get("llmRaw") or ""),
+            )
 
         is_sensitive = self._moderate_text(result_text)
         qc = self._classify_non_target_qc(result_text)
@@ -1671,19 +1759,23 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 hallucination=hallu_meta,
             )
 
-            if not result_text:
-                out = {
-                    "status": "success",
-                    "text": "",
-                    "isSensitive": False,
-                    "qc": {
-                        "isNonTarget": False,
-                        "englishRatio": 0.0,
-                        "nonTargetSource": "none",
-                        "hallucination": hallu_meta,
-                    },
-                }
-                _job_update(job_id, status="success", step="done", message="เสร็จสิ้น (ไม่มีข้อความ)", finishedAt=time.time(), result=out, isSensitive=False)
+            aq = classify_transcript_audio_quality_qc(result_text or "")
+            if aq.get("trigger"):
+                out = _response_audio_quality_bad(
+                    str(aq.get("category") or "BAD_UNINTELLIGIBLE"),
+                    hallu_meta,
+                    str(aq.get("llmRaw") or ""),
+                )
+                _job_update(
+                    job_id,
+                    status="success",
+                    step="done",
+                    message=f"audioQuality {aq.get('category')} — ข้าม format",
+                    finishedAt=time.time(),
+                    result=out,
+                    isSensitive=False,
+                    textLen=0,
+                )
                 _session_stats_record_transcribe(time.time() - t0)
                 return
 

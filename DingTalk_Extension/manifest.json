@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DingTalk Auto-Pilot",
-  "version": "1.6.15",
+  "version": "1.6.16",
   "description": "Automatically clicks Accept if the classification is Valid. Adds Shift+\u2191 hotkey to apply Annotators-exclude filter. Breaks Shift+\u2191 bounce-back loop with Shift+\u2193 when the same task is seen 3+ times in 2 minutes. After Update, detects the 'Quality Check Failed' modal (.lsf-modal-dm) and dismisses it by clicking 'Ignore & Submit' before moving to the next task. Created by IQ.Automatron",
   "host_permissions": [
     "http://127.0.0.1:54321/*",

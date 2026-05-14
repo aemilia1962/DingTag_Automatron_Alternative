@@ -265,6 +265,14 @@ async function postTranscribe(audioBase64) {
             qc.longSilence.longestRunSec
         );
     }
+    if (qc.audioQuality) {
+        logParts.push(
+            "| audioQuality:",
+            qc.audioQuality.trigger,
+            "category:",
+            qc.audioQuality.category
+        );
+    }
     if (qc.foreignScript) {
         logParts.push(
             "| foreignScript:",
@@ -4215,6 +4223,23 @@ setInterval(() => {
                             setStatus("เงียบ/ไม่มีเสียงพูดต่อเนื่องเกิน 2.5 วิ — ส่ง Data Missing");
                             await runInvalidDataMissingAcceptFlow(
                                 "Long silence / low-energy segment (>=2.5s)",
+                                runToken,
+                                cycleStartAt,
+                                pipelineTaskId
+                            );
+                            return;
+                        }
+
+                        const audioQ = qc.audioQuality;
+                        if (audioQ && audioQ.trigger === true) {
+                            console.warn(
+                                `[DingTag] AI QC เสียง/ถอดเสียง → ${audioQ.category || "BAD"} (Data Missing)`
+                            );
+                            setStatus(
+                                `คุณภาพเสียง/ถอดเสียงไม่ผ่าน (${audioQ.category || ""}) — ส่ง Data Missing`
+                            );
+                            await runInvalidDataMissingAcceptFlow(
+                                `Audio/transcript QC: ${audioQ.category || "BAD"}`,
                                 runToken,
                                 cycleStartAt,
                                 pipelineTaskId

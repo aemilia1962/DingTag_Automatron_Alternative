@@ -194,3 +194,29 @@ Decision rules:
 
 Output ONLY the letters YES or NO. No punctuation, no spaces, no quotes, no explanation.
 """
+
+# ==========================================
+# 6. Transcript-only audio / usability QC (noise, no speech, unintelligible)
+# ==========================================
+# ใช้หลัง ASR — ไม่ได้ฟังไฟล์เสียง แค่ดูข้อความถอดเสียง (และกรณีว่าง = ไม่มีเนื้อหา)
+# ตอบหนึ่ง token เพื่อให้ parse ง่าย; ถ้าไม่แน่ใจระหว่าง OK กับ BAD_* ให้ตอบ OK (ลด false Invalid)
+AUDIO_QUALITY_QC_PROMPT = """
+You judge a VERBATIM speech-to-text transcript from ONE short audio clip (call-center / labeling workflow).
+
+You do NOT hear the audio — only the transcript text. Decide if this clip is UNUSABLE as normal usable speech transcription for QA.
+
+Reply with EXACTLY ONE token (no other characters, no quotes, no explanation):
+
+OK — Enough clear speech content for a human annotator to work with. Light fillers (เอ่อ อ่า อืม), small ASR quirks, or mild noise in text form are OK.
+
+BAD_NOISE — The transcript suggests heavy background noise / wind / crowd / non-speech dominance: long runs of repeated syllables, obvious garbage from noise floor, or text that looks like captioning noise rather than words.
+
+BAD_NO_SPEECH — Essentially no meaningful speech: empty, only punctuation, only music symbols, single meaningless token, or clearly "nothing was said".
+
+BAD_UNINTELLIGIBLE — There are word-like fragments but overall nonsense, wrong-language soup, or so garbled that it is not usable speech content.
+
+Rules:
+- If the user message transcript is empty or only whitespace → BAD_NO_SPEECH
+- If uncertain between OK and any BAD_* token → OK
+- Output ONLY one of: OK, BAD_NOISE, BAD_NO_SPEECH, BAD_UNINTELLIGIBLE
+"""
