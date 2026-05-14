@@ -26,7 +26,9 @@ let activeTimeouts = [];
 let lastNoTargetLogAt = 0;
 let runTokenCounter = 0;
 let activeRunToken = 0;
+/** Task ที่กำลังรัน pipeline (claim) — ตั้งตอนเริ่มงาน; ยังไม่ถือว่า "ส่ง Update แล้ว" จนกว่าจะ add เข้า processedTaskIds */
 let lastProcessedTaskId = "";
+/** Task ID ที่กด Update สำเร็จแล้ว — ใช้จำกัดการวนกลับไปทำซ้ำ / duplicate-loop */
 const processedTaskIds = new Set();
 let lastSeenUrl = location.href;
 // ติดตาม task ใหม่ที่ยังไม่เจอ Classification — ใช้คำนวณว่าควร auto-skip เมื่อใด
@@ -92,7 +94,7 @@ function clearAllTasks() {
     // รีเซ็ต auto-filter idle tracker (จะเริ่มนับใหม่เมื่อ bot ON อีกครั้ง)
     noTargetIdleSince = 0;
     lastAutoFilterAt = 0;
-    console.log("🛑 Kill Switch: ยกเลิกการกระทำทั้งหมด! (cleared processed history)");
+    console.log("🛑 Kill Switch: ยกเลิกการกระทำทั้งหมด! (cleared committed task history)");
 }
 
 function resetTaskGate(reason = "unknown") {
@@ -766,7 +768,7 @@ function updateApplyFilterBtnState() {
 updateApplyFilterBtnState();
 setInterval(updateApplyFilterBtnState, 1500);
 
-// ปุ่ม Clear History (ล้างประวัติ task ที่เคยทำ)
+// ปุ่ม Clear History (ล้างประวัติ task ที่กด Update สำเร็จแล้ว)
 const clearHistoryBtn = document.createElement("button");
 clearHistoryBtn.innerText = "🧹 Clear Task History";
 clearHistoryBtn.style.marginTop = "12px";
@@ -785,7 +787,7 @@ clearHistoryBtn.addEventListener("click", () => {
     lastProcessedTaskId = "";
     stuckTaskId = "";
     stuckTaskDetectedAt = 0;
-    console.log(`🧹 ล้างประวัติ task ที่เคยทำ (${count} รายการ) — สามารถทำซ้ำได้อีก`);
+    console.log(`🧹 ล้างประวัติ task ที่ Update สำเร็จแล้ว (${count} รายการ) — สามารถทำซ้ำได้อีก`);
     setStatus(`ล้างประวัติแล้ว (${count} tasks) — พร้อมทำงานใหม่`);
 });
 settingsContainer.appendChild(clearHistoryBtn);
@@ -2436,6 +2438,8 @@ async function runInvalidReasonAcceptFlow(
         updatePressEscBeforeClick = false,
         updateEscBeforeClickDelayMs = 200,
         preCheckboxDelayMs = 0,
+        /** ถ้ามี — ก่อนกด Update จะเช็คว่า .lsf-current-task__task-id ยังตรงกับ task นี้; หลัง Update สำเร็จจะ add เข้า processedTaskIds */
+        expectedTaskId = "",
     }
 ) {
     console.log(`🚩 ${reasonText}: Invalid -> ${logLabel} -> Classification -> Update`);
@@ -2512,6 +2516,14 @@ async function runInvalidReasonAcceptFlow(
     }
     if (!isRunActive(runToken)) return;
 
+    if (expectedTaskId) {
+        const tchk = verifyExpectedTaskIdBeforeUpdate(expectedTaskId, `invalid flow (${logLabel})`);
+        if (!tchk.ok) {
+            setStatus("Invalid flow: Task เปลี่ยนก่อน Update — ข้าม");
+            return;
+        }
+    }
+
     const updRes = await clickUpdateWithEnabledCheck({
         runToken,
         maxTries: updateMaxTries,
@@ -2522,6 +2534,9 @@ async function runInvalidReasonAcceptFlow(
         escBeforeClickDelayMs: updateEscBeforeClickDelayMs,
     });
     if (updRes.ok) {
+        if (expectedTaskId) {
+            markTaskCommittedAfterSuccessfulUpdate(expectedTaskId);
+        }
         setStatus("Invalid flow: ส่งงานแล้ว — รอ 2 วิ ก่อน Shift+↓");
         // หน่วง 2 วิ หลัง Update เหมือน Valid/Verified flows
         await delay(2000);
@@ -2547,23 +2562,35 @@ async function runInvalidReasonAcceptFlow(
     }
 }
 
-async function runInvalidDataMissingAcceptFlow(reasonText = "invalid flow", runToken, cycleStartAt) {
+async function runInvalidDataMissingAcceptFlow(
+    reasonText = "invalid flow",
+    runToken,
+    cycleStartAt,
+    expectedTaskId = ""
+) {
     return runInvalidReasonAcceptFlow(reasonText, {
         checkboxName: "Data Missing",
         menuNeedles: ["data missing", "datamissing"],
         logLabel: "Data Missing",
         runToken,
         cycleStartAt,
+        expectedTaskId,
     });
 }
 
-async function runInvalidNonTargetLanguageAcceptFlow(reasonText = "non-target language", runToken, cycleStartAt) {
+async function runInvalidNonTargetLanguageAcceptFlow(
+    reasonText = "non-target language",
+    runToken,
+    cycleStartAt,
+    expectedTaskId = ""
+) {
     return runInvalidReasonAcceptFlow(reasonText, {
         checkboxName: "Non-Target Language",
         menuNeedles: ["non-target", "non target language", "nontarget language", "non target", "nontarget"],
         logLabel: "Non-Target Language",
         runToken,
         cycleStartAt,
+        expectedTaskId,
         // Non-Target (ใช้ robustClick ทุกจุด — cross-machine ทำงานเหมือนกันทุกเครื่อง):
         // • หลังกด Invalid + เปิดเมนู → หน่วง 1.5 วินาที ก่อนติ๊ก checkbox
         // • ติ๊ก checkbox ด้วย JS click ปกติ (clickAntCheckboxByNameAndVerify)
@@ -2657,7 +2684,7 @@ async function switchClassificationInvalidToValid(runToken) {
  *  7) ตรวจ popup "Ignore & Submit" ถ้าโผล่ก็ปิดให้
  *  8) Shift+↓ ไป task ถัดไป
  */
-async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
+async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId = "") {
     console.log("🚩 Invalid flow: Esc → Optimized → Has Errors → Physical click Update");
     setStatus("Invalid — กด Esc แล้วเปลี่ยนเป็น Optimized → Has Errors");
 
@@ -2713,6 +2740,14 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
     await delay(300);
     if (!isRunActive(runToken)) return;
 
+    if (expectedTaskId) {
+        const tchk = verifyExpectedTaskIdBeforeUpdate(expectedTaskId, "Invalid→Verified flow");
+        if (!tchk.ok) {
+            setStatus("Invalid flow: Task เปลี่ยนก่อน Update — ข้าม");
+            return;
+        }
+    }
+
     const updRes = await clickUpdateWithEnabledCheck({
         runToken,
         maxTries: 3,
@@ -2726,6 +2761,9 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt) {
     if (updRes.reason === "stale") return;
 
     if (updRes.ok) {
+        if (expectedTaskId) {
+            markTaskCommittedAfterSuccessfulUpdate(expectedTaskId);
+        }
         setStatus("Invalid flow: ส่งงานแล้ว — รอให้ระบบบันทึก");
         await delay(1500);
         if (!isRunActive(runToken)) return;
@@ -2771,6 +2809,36 @@ function getCurrentTaskId() {
     const el = document.querySelector(".lsf-current-task__task-id");
     if (!el) return "";
     return (el.textContent || "").trim();
+}
+
+/** จำว่า task นี้ส่ง Update สำเร็จแล้ว (เรียกหลัง clickUpdate สำเร็จเท่านั้น) */
+function markTaskCommittedAfterSuccessfulUpdate(taskId) {
+    if (!taskId) return;
+    processedTaskIds.add(taskId);
+    lastProcessedTaskId = taskId;
+    console.log(`[DingTag] บันทึกประวัติ task ${taskId} (Update สำเร็จ)`);
+}
+
+/**
+ * ก่อนกด Update — ตรวจว่า UI ยังชี้ task เดิมอยู่
+ * @returns {{ ok: boolean, current: string, reason: string }}
+ */
+function verifyExpectedTaskIdBeforeUpdate(expectedTaskId, logLabel = "pre-Update") {
+    if (!expectedTaskId) {
+        return { ok: true, current: getCurrentTaskId(), reason: "no_expected" };
+    }
+    const current = getCurrentTaskId();
+    if (!current) {
+        console.warn(`[DingTag] ${logLabel}: อ่าน Task ID ปัจจุบันไม่ได้ (คาดหวัง ${expectedTaskId})`);
+        return { ok: false, current: "", reason: "no_current" };
+    }
+    if (current !== expectedTaskId) {
+        console.warn(
+            `[DingTag] ${logLabel}: Task ID ไม่ตรง — คาดหวัง ${expectedTaskId} แต่ได้ ${current} → ข้าม Update`
+        );
+        return { ok: false, current, reason: "mismatch" };
+    }
+    return { ok: true, current, reason: "ok" };
 }
 
 // ===========================================================================
@@ -3930,7 +3998,7 @@ setInterval(() => {
                 return;
             }
 
-            // เช็คว่า task นี้เคยทำแล้ว (ทั้ง lastProcessedTaskId และ Set ทั้งหมด)
+            // เช็คว่า task นี้เคยส่ง Update สำเร็จแล้ว (processedTaskIds) หรือเป็น task เดิมที่ claim ไว้แต่ยังไม่ commit (lastProcessedTaskId)
             if (currentTaskId === lastProcessedTaskId || processedTaskIds.has(currentTaskId)) {
                 const now = Date.now();
 
@@ -4062,8 +4130,8 @@ setInterval(() => {
             }
 
             isProcessing = true;
+            // claim task — บันทึกว่า "ส่ง Update สำเร็จแล้ว" เฉพาะหลังกด Update ผ่าน (processedTaskIds)
             lastProcessedTaskId = currentTaskId;
-            processedTaskIds.add(currentTaskId);
             setStatus(`พบ target task ${currentTaskId} แล้ว กำลังทำงาน...`);
             scrollSidebarToActiveTask();
 
@@ -4072,6 +4140,7 @@ setInterval(() => {
                     const runToken = ++runTokenCounter;
                     activeRunToken = runToken;
                     const cycleStartAt = Date.now();
+                    const pipelineTaskId = currentTaskId;
 
                     await delay(READ_DELAY_MS);
                     if (!isRunActive(runToken)) return;
@@ -4132,7 +4201,7 @@ setInterval(() => {
                         if (data.isSensitive === true) {
                             console.warn("⚠️ เนื้อหาอ่อนไหว (Politics/War/Monarchy) — ข้ามการวางข้อความ และคงค่าเดิมไว้");
                             setStatus("Sensitive — ส่ง invalid flow");
-                            await runInvalidDataMissingAcceptFlow("Sensitive content", runToken, cycleStartAt);
+                            await runInvalidDataMissingAcceptFlow("Sensitive content", runToken, cycleStartAt, pipelineTaskId);
                             return;
                         }
 
@@ -4187,7 +4256,8 @@ setInterval(() => {
                                     ? `Non-target language (foreign script: ${qc.foreignScript})`
                                     : "Non-target language (QC)",
                                 runToken,
-                                cycleStartAt
+                                cycleStartAt,
+                                pipelineTaskId
                             );
                             return;
                         }
@@ -4205,7 +4275,8 @@ setInterval(() => {
                             await runInvalidDataMissingAcceptFlow(
                                 "Repetitive transcript / data missing (hallucination)",
                                 runToken,
-                                cycleStartAt
+                                cycleStartAt,
+                                pipelineTaskId
                             );
                             return;
                         }
@@ -4247,7 +4318,8 @@ setInterval(() => {
                                     await runInvalidDataMissingAcceptFlow(
                                         "Repetitive text after formalize / data missing",
                                         runToken,
-                                        cycleStartAt
+                                        cycleStartAt,
+                                        pipelineTaskId
                                     );
                                     return;
                                 }
@@ -4320,6 +4392,12 @@ setInterval(() => {
                     await delay(200);
                     if (!isRunActive(runToken)) return;
 
+                    const validTaskChk = verifyExpectedTaskIdBeforeUpdate(pipelineTaskId, "Valid flow");
+                    if (!validTaskChk.ok) {
+                        setStatus("Valid: Task เปลี่ยนก่อน Update — ข้ามการกด Update");
+                        return;
+                    }
+
                     console.log("🔍 กำลังเช็คปุ่ม Update (robustClick)...");
                     const updMainRes = await clickUpdateWithEnabledCheck({
                         runToken,
@@ -4343,6 +4421,7 @@ setInterval(() => {
                         return;
                     }
                     console.log("✅ 4. กดปุ่ม Update สำเร็จ! (robustClick)");
+                    markTaskCommittedAfterSuccessfulUpdate(pipelineTaskId);
                     setStatus("Valid: ส่งงานแล้ว — รอให้ระบบบันทึก");
 
                     await delay(1500);
