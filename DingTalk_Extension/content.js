@@ -1804,6 +1804,63 @@ async function clickHasErrorsRadio({ tries = 5, intervalMs = 300, runToken } = {
 }
 
 /**
+ * คลิก radio "Verified" (Review Result / Ant Design)
+ * โครงสร้าง: <input name="Verified" class="ant-radio-input" type="radio">
+ */
+async function clickVerifiedRadio({ tries = 5, intervalMs = 300, runToken } = {}) {
+    for (let i = 1; i <= tries; i++) {
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale" };
+        }
+        let radio =
+            document.querySelector('input.ant-radio-input[name="Verified"]') ||
+            document.querySelector('input[type="radio"][name="Verified"]');
+        if (radio) {
+            try {
+                radio.scrollIntoView?.({ block: "center" });
+            } catch {}
+            const wrapper =
+                radio.closest(".ant-radio-wrapper") || radio.closest("label") || radio.parentElement;
+            if (wrapper && wrapper !== radio) {
+                try {
+                    if (fireFullMouseClick(wrapper)) {
+                        console.log(`✅ คลิก Verified (radio) สำเร็จ (wrapper, ${i}/${tries})`);
+                        return { ok: true };
+                    }
+                    wrapper.click();
+                    console.log(`✅ คลิก Verified (radio) สำเร็จ (wrapper.click, ${i}/${tries})`);
+                    return { ok: true };
+                } catch {}
+            }
+            try {
+                radio.click();
+                console.log(`✅ คลิก Verified (radio) สำเร็จ (radio.click, ${i}/${tries})`);
+                return { ok: true };
+            } catch {}
+        }
+
+        const btn = findClickableByContainsText(["verified"]);
+        if (btn && btn.closest && btn.closest(".ant-radio-wrapper, label.ant-radio-wrapper")) {
+            try {
+                btn.scrollIntoView?.({ block: "center" });
+            } catch {}
+            if (fireFullMouseClick(btn)) {
+                console.log(`✅ คลิก Verified (radio) สำเร็จ (ant label, ${i}/${tries})`);
+                return { ok: true };
+            }
+            try {
+                btn.click();
+                console.log(`✅ คลิก Verified (radio) สำเร็จ (ant label .click, ${i}/${tries})`);
+                return { ok: true };
+            } catch {}
+        }
+        await delay(intervalMs);
+    }
+    console.warn("⚠️ ไม่พบ radio Verified (Ant)");
+    return { ok: false, reason: "not_found" };
+}
+
+/**
  * คลิกปุ่ม Verified แบบยืดหยุ่น:
  *  1) ลองหา .lsf-hint [w] แล้ว full-mouse-click parent (มี fallback เป็น .click())
  *  2) ถ้ายังไม่เจอ → findClickableByContainsText(["verified"])
@@ -4223,16 +4280,44 @@ setInterval(() => {
                         console.warn("⚠️ ก่อนส่งงาน: ไม่พบ Classification value element");
                     }
 
-                    // Valid flow: ก่อนกด Update → blur active element + กด Escape
-                    // จากนั้นใช้ Physical click (Python pyautogui) เลื่อนเมาส์จริง ๆ ไปกดปุ่ม Update
-                    // เหมือนกับ Invalid → Verified flow เพื่อให้ Label Studio รับ click แน่นอน
+                    // Valid flow: ก่อนกด Update → blur + Esc แล้วเลือก Optimized → Verified (Ant radio) ค่อยกด Update
                     if (blurAnyActiveElement()) {
-                        console.log("👀 Valid flow: blur active element ก่อนกด Update");
+                        console.log("👀 Valid flow: blur active element ก่อนเลือก Review radios");
+                    }
+                    if (dispatchEscape()) {
+                        console.log("⎋ Valid flow: ส่ง Escape ก่อนเลือก Review radios");
+                    }
+                    await delay(300);
+                    if (!isRunActive(runToken)) return;
+
+                    setStatus("Valid: กด Optimized → Verified ก่อน Update");
+                    const optValidRes = await clickOptimizedRadio({ tries: 5, intervalMs: 300, runToken });
+                    if (!optValidRes.ok && optValidRes.reason === "stale") return;
+                    if (!optValidRes.ok) {
+                        console.warn("⚠️ Valid flow: ไม่พบ radio Optimized — ยังลอง Verified แล้ว Update ต่อ");
+                    } else {
+                        console.log("✅ Valid flow: เลือก Optimized แล้ว — รอก่อนกด Verified");
+                    }
+                    await delay(800);
+                    if (!isRunActive(runToken)) return;
+
+                    const verRadioRes = await clickVerifiedRadio({ tries: 5, intervalMs: 300, runToken });
+                    if (!verRadioRes.ok && verRadioRes.reason === "stale") return;
+                    if (!verRadioRes.ok) {
+                        console.warn("⚠️ Valid flow: ไม่พบ radio Verified — ยังลองกด Update");
+                    } else {
+                        console.log("✅ Valid flow: เลือก Verified (radio) แล้ว");
+                    }
+                    await delay(300);
+                    if (!isRunActive(runToken)) return;
+
+                    if (blurAnyActiveElement()) {
+                        console.log("👀 Valid flow: blur หลังเลือก radios ก่อนกด Update");
                     }
                     if (dispatchEscape()) {
                         console.log("⎋ Valid flow: ส่ง Escape ก่อนกด Update");
                     }
-                    await delay(300);
+                    await delay(200);
                     if (!isRunActive(runToken)) return;
 
                     console.log("🔍 กำลังเช็คปุ่ม Update (robustClick)...");
