@@ -139,6 +139,7 @@ from prompts import (
     CONTENT_MODERATION_PROMPT,
     CONTENT_MODERATION_RECHECK_PROMPT,
     NON_TARGET_LANGUAGE_PROMPT,
+    NON_TARGET_LANGUAGE_RECHECK_PROMPT,
     AUDIO_QUALITY_QC_PROMPT,
 )
 from aibot_gui import AppUI
@@ -1025,6 +1026,56 @@ def parse_non_target_is_yes(content: str) -> bool:
     return False
 
 
+def _llm_non_target_verdict(system_prompt: str, user_text: str) -> str:
+    return chat_completion_with_retry(
+        client,
+        [MODERATION_MODEL],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+        temperature=0.0,
+        max_tokens=16,
+        timeout=30,
+    )
+
+
+def classify_non_target_central_thai_with_llm(text: str) -> dict[str, Any]:
+    """Primary non-target LLM + recheck on YES (mirrors sensitive moderation flow).
+
+    Primary YES + recheck NO → in scope (Central Thai). Unparseable recheck → not non-target.
+    """
+    user = (text or "").strip()[:8000]
+    out: dict[str, Any] = {
+        "is_non_target": False,
+        "primary_raw": "",
+        "recheck_raw": "",
+        "recheck_used": False,
+        "recheck_overturned": False,
+    }
+    if not user:
+        return out
+
+    raw = _llm_non_target_verdict(NON_TARGET_LANGUAGE_PROMPT, user)
+    out["primary_raw"] = (raw or "")[:400]
+    primary_yes = parse_non_target_is_yes(raw)
+    if not primary_yes:
+        return out
+
+    raw2 = _llm_non_target_verdict(NON_TARGET_LANGUAGE_RECHECK_PROMPT, user)
+    out["recheck_raw"] = (raw2 or "")[:400]
+    out["recheck_used"] = True
+    recheck_yes = parse_non_target_is_yes(raw2)
+    out["is_non_target"] = recheck_yes
+    out["recheck_overturned"] = not recheck_yes
+    if out["recheck_overturned"]:
+        snippet = (raw or "").replace("\n", " ")[:80]
+        print(
+            f"[API] QC Non-Target recheck → ไทยกลาง (ยกเลิก false positive) | primary≈{snippet!r}"
+        )
+    return out
+
+
 def parse_audio_quality_verdict(content: str) -> str:
     """คืน OK | BAD_NOISE | BAD_NO_SPEECH | BAD_UNINTELLIGIBLE | UNKNOWN"""
     t = (content or "").strip().upper()
@@ -1537,18 +1588,18 @@ class AITranscriberApp(AppUI, ctk.CTk):
         0) เจออักษรต่างประเทศที่ไม่ใช่ไทย/ละติน (จีน/ญี่ปุ่น/เกาหลี/ซีริลลิก/อาหรับ/ฯลฯ)
            → non-target ทันที (ไม่ต้องเรียก LLM)
         1) ratio >= high      → non-target (English/foreign script dominant)
-        2) มีอักษรไทย / ratio >= low → ส่งเข้า LLM (NON_TARGET_LANGUAGE_PROMPT)
-           เพื่อจับภาษาถิ่น (เหนือ/อีสาน/ใต้) และภาษาต่างประเทศที่ปนภาษาไทยอยู่
+        2) มีอักษรไทย / ratio >= low → collapse ASR spacing แล้วส่ง LLM + recheck ถ้า primary YES
         3) อื่นๆ → ไม่ใช่ non-target
         """
         cfg = getattr(self, "qc_config", None) or _qc_defaults()
         th = float(cfg.get("non_target_english_ratio", DEFAULT_NON_TARGET_ENGLISH_RATIO))
         low = float(cfg.get("non_target_gray_low", DEFAULT_NON_TARGET_GRAY_RATIO_LOW))
-        ratio = latin_vs_thai_letter_ratio(result_text)
-        has_thai = has_thai_chars(result_text)
+        qc_text = collapse_overspaced_thai((result_text or "").strip())
+        ratio = latin_vs_thai_letter_ratio(qc_text)
+        has_thai = has_thai_chars(qc_text)
 
         # (0) Fast path: clear non-Thai/non-Latin script (CJK, kana, Hangul, Cyrillic, ฯลฯ)
-        foreign_label, foreign_count, foreign_share = detect_dominant_foreign_script(result_text)
+        foreign_label, foreign_count, foreign_share = detect_dominant_foreign_script(qc_text)
         if foreign_label:
             return {
                 "isNonTarget": True,
@@ -1561,28 +1612,30 @@ class AITranscriberApp(AppUI, ctk.CTk):
 
         is_non_target = False
         source: str = "none"
+        llm_meta: dict[str, Any] = {}
         if ratio >= th:
             is_non_target = True
             source = "english_ratio"
         elif has_thai or ratio >= low:
-            raw = chat_completion_with_retry(
-                client,
-                [MODERATION_MODEL],
-                messages=[
-                    {"role": "system", "content": NON_TARGET_LANGUAGE_PROMPT},
-                    {"role": "user", "content": (result_text or "")[:8000]},
-                ],
-                temperature=0.0,
-                max_tokens=16,
-                timeout=30,
-            )
-            is_non_target = parse_non_target_is_yes(raw)
-            source = "llm_central_thai" if is_non_target else "none"
-        return {
+            llm_meta = classify_non_target_central_thai_with_llm(qc_text)
+            is_non_target = bool(llm_meta.get("is_non_target"))
+            if is_non_target:
+                source = "llm_central_thai"
+            elif llm_meta.get("recheck_overturned"):
+                source = "llm_central_thai_recheck_no"
+        qc_out: dict[str, Any] = {
             "isNonTarget": is_non_target,
             "englishRatio": round(ratio, 4),
             "nonTargetSource": source,
         }
+        if llm_meta.get("recheck_used"):
+            qc_out["centralThaiRecheck"] = {
+                "used": True,
+                "overturned": bool(llm_meta.get("recheck_overturned")),
+                "primaryRaw": llm_meta.get("primary_raw") or "",
+                "recheckRaw": llm_meta.get("recheck_raw") or "",
+            }
+        return qc_out
 
     def run_transcribe_then_moderate(self, audio_b64: str) -> dict:
         """Step 1: ASR + basic cleaning + moderation (NO formalize)."""
