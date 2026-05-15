@@ -18,6 +18,8 @@ let minElapsedBeforeAcceptMs = Math.max(
 // บังคับใช้เสมอ: กรอง Sensitive + Non-target auto invalid (ไม่มี toggle ใน Settings)
 let autoSkipNoClassificationEnabled =
     localStorage.getItem("dingtag_auto_skip_no_classification") !== "0";
+/** เปิด = เจอ Classification Invalid ไม่สลับเป็น Valid / ไม่ถอดเสียง — กด Optimized → Has Errors → เช็ค Task ID ก่อน Update */
+let noRecheckInvalidEnabled = localStorage.getItem("dingtag_no_recheck_invalid") === "1";
 let noClassificationTimeoutMs = Math.max(
     1000,
     parseInt(localStorage.getItem("dingtag_no_classification_timeout_ms") || "8000", 10) || 8000
@@ -611,6 +613,42 @@ autoResetInput.addEventListener("change", () => {
     autoResetHistoryEnabled = autoResetInput.checked;
     localStorage.setItem("dingtag_auto_reset_history_enabled", autoResetHistoryEnabled ? "1" : "0");
     console.log("[DingTag] Auto-Reset History on Loop:", autoResetHistoryEnabled ? "ON" : "OFF");
+});
+
+// Invalid: ไม่สลับเป็น Valid — กด Review radios แล้ว Update (เช็ค Task ID ก่อน Update ใน flow)
+const noRecheckInvalidRow = document.createElement("div");
+noRecheckInvalidRow.style.display = "flex";
+noRecheckInvalidRow.style.alignItems = "center";
+noRecheckInvalidRow.style.justifyContent = "space-between";
+noRecheckInvalidRow.style.gap = "8px";
+noRecheckInvalidRow.style.marginTop = "10px";
+settingsContainer.appendChild(noRecheckInvalidRow);
+
+const noRecheckInvalidLabel = document.createElement("label");
+noRecheckInvalidLabel.innerText = "🚫 No Recheck Invalid";
+noRecheckInvalidLabel.style.fontSize = "12px";
+noRecheckInvalidLabel.style.cursor = "pointer";
+noRecheckInvalidRow.appendChild(noRecheckInvalidLabel);
+
+const noRecheckInvalidInput = document.createElement("input");
+noRecheckInvalidInput.type = "checkbox";
+noRecheckInvalidInput.checked = noRecheckInvalidEnabled;
+noRecheckInvalidInput.style.cursor = "pointer";
+noRecheckInvalidInput.title =
+    "เปิด: เมื่อ Classification = Invalid — ไม่สลับเป็น Valid / ไม่ถอดเสียง\n" +
+    "→ กด Optimized แล้ว Has Errors แล้วเช็ค Task ID ก่อนกด Update\n" +
+    "ปิด: เดิม (สลับเป็น Valid แล้วรัน pipeline ถอดเสียง)";
+noRecheckInvalidRow.appendChild(noRecheckInvalidInput);
+
+noRecheckInvalidLabel.addEventListener("click", () => {
+    noRecheckInvalidInput.checked = !noRecheckInvalidInput.checked;
+    noRecheckInvalidInput.dispatchEvent(new Event("change"));
+});
+
+noRecheckInvalidInput.addEventListener("change", () => {
+    noRecheckInvalidEnabled = noRecheckInvalidInput.checked;
+    localStorage.setItem("dingtag_no_recheck_invalid", noRecheckInvalidEnabled ? "1" : "0");
+    console.log("[DingTag] No Recheck Invalid:", noRecheckInvalidEnabled ? "ON" : "OFF");
 });
 
 // หลัง Order by: สวิตช์เล็ก — ปิด = ท้ายก่อน (Sort 1×), เปิด = หัวก่อน (Sort 2×)
@@ -2687,8 +2725,8 @@ async function switchClassificationInvalidToValid(runToken) {
 }
 
 /**
- * Flow เดิม: เจอ Classification = Invalid → Esc → Optimized → Has Errors → Update
- * (ไม่ถูกเรียกจาก autopilot หลักอีกต่อไป — เก็บไว้เผื่ออ้างอิง/นำกลับมาใช้)
+ * เจอ Classification = Invalid แบบไม่สลับเป็น Valid: Esc → Optimized → Has Errors → เช็ค Task ID → Update
+ * เรียกจาก autopilot เมื่อเปิดสวิตช์ "No Recheck Invalid" (dingtag_no_recheck_invalid)
  *
  * ขั้นตอน:
  *  1) ส่ง Escape เพื่อปิด popup/dropdown ที่อาจค้างอยู่
@@ -2701,8 +2739,8 @@ async function switchClassificationInvalidToValid(runToken) {
  *  8) Shift+↓ ไป task ถัดไป
  */
 async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId = "") {
-    console.log("🚩 Invalid flow: Esc → Optimized → Has Errors → Physical click Update");
-    setStatus("Invalid — กด Esc แล้วเปลี่ยนเป็น Optimized → Has Errors");
+    console.log("🚩 Invalid (No Recheck): Esc → Optimized → Has Errors → Update");
+    setStatus("Invalid (No Recheck) — Optimized → Has Errors");
 
     if (dispatchEscape()) {
         console.log("⎋ Invalid flow: ส่ง Escape ก่อนคลิก Optimized");
@@ -2757,7 +2795,7 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId =
     if (!isRunActive(runToken)) return;
 
     if (expectedTaskId) {
-        const tchk = verifyExpectedTaskIdBeforeUpdate(expectedTaskId, "Invalid→Verified flow");
+        const tchk = verifyExpectedTaskIdBeforeUpdate(expectedTaskId, "Invalid Optimized→Has Errors flow");
         if (!tchk.ok) {
             setStatus("Invalid flow: Task เปลี่ยนก่อน Update — ข้าม");
             return;
@@ -4168,6 +4206,14 @@ setInterval(() => {
                     if (!isRunActive(runToken)) return;
 
                     if (classificationValue === "invalid") {
+                        if (noRecheckInvalidEnabled) {
+                            console.log(
+                                "⚡ Classification = Invalid — No Recheck: Optimized → Has Errors → เช็ค Task ID → Update"
+                            );
+                            setStatus("Invalid (No Recheck): Optimized → Has Errors…");
+                            await runInvalidToVerifiedFlow(runToken, cycleStartAt, pipelineTaskId);
+                            return;
+                        }
                         console.log(
                             "⚡ Classification = Invalid → สลับเป็น Valid แล้วรัน pipeline (คัดกรองด้วย API)"
                         );
