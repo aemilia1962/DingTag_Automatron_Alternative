@@ -174,13 +174,16 @@ TARGET — answer NO:
 - Standard / Central Thai (ภาษาไทยกลาง) — Bangkok-style standard written/spoken Thai.
 - Standard Thai mixed with common English loanwords or short English clauses (e.g. "ส่ง email ให้ลูกค้า", "เปิด VIP มั้ย", "ระบบ Fast Track").
 - Slightly accented standard Thai that still uses standard vocabulary and grammar.
+- Thai weather / news broadcast in standard Central Thai (พยากรณ์อากาศ, ลมยก, ฝนฟ้าคะนอง, ไซโคลอน, พายุ, ความกดอากาศ) even with colloquial particles (ฮะ, นะฮะ, ครับ).
+- Geographic region names are NOT dialect: "ภาคอีสาน", "พื้นที่อีสาน", "ภาคเหนือ", "ภาคใต้", "ในพื้นที่อีสานของไทย" = Central Thai place references → NO.
+- Standard verbs with นำ: "นำให้", "นำไปสู่", "นำมาซึ่ง" are Central Thai (NOT the Isan particle "นำ" meaning "ด้วย" alone).
 
 NON-TARGET — answer YES:
 1) Regional Thai DIALECTS that are clearly distinct from standard Central Thai, especially when dialect-specific particles/vocabulary appear, e.g.:
    • Northern Thai / Kham Mueang (ภาษาเหนือ / กำเมือง):
      คำชี้/สรรพนาม/อนุภาค เช่น "เปิ้น, ตั๋ว, สู, ตี้, อะหยัง, บ่ฮู้, อู้, จะใด, หื้อ, เน้อ, กา, ก่อ, จะอี้, จาว, ลุง/ป้อ/แม่อุ๊ย"
-   • Northeastern Thai / Isan / Lao (ภาษาอีสาน):
-     เช่น "บ่, สิ, เฮ็ด, เด้, แม่นบ่, แซ่บ, เอื้อย, อ้าย, จักหน่อย, นำ (= ด้วย), เบิ่ง, เว้า, ข่อย, จัง, เป็นจังได๋, ว่าจั่งซั่น"
+   • Northeastern Thai / Isan / Lao (ภาษาถิ่นอีสาน — NOT the geographic word อีสาน alone):
+     เช่น "บ่, สิ, เฮ็ด, เด้, แม่นบ่, แซ่บ, เอื้อย, อ้าย, จักหน่อย, เบิ่ง, เว้า, ข่อย, จัง, เป็นจังได๋, ว่าจั่งซั่น" และอนุภาค "นำ" ในความหมาย "ด้วย" (เช่น "กินข้าวนำ" ไม่ใช่ "นำให้/นำไปสู่")
    • Southern Thai / Pak Tai (ภาษาใต้):
      เช่น "หรอย, แหลง, ตู, นุ้ย, หวา, ไอ้หรอย, พรือ, หวันนี้, บ่าว (ใต้)"
    • Other clearly identifiable Thai dialects/sub-dialects.
@@ -191,6 +194,26 @@ Decision rules:
 - Answer YES only when dialect / foreign language is CLEAR and DOMINANT (multiple dialect markers, or majority of the text).
 - A single ambiguous word, a slight accent, or one common Thai colloquialism is NOT enough — answer NO.
 - If uncertain, prefer NO.
+
+Output ONLY the letters YES or NO. No punctuation, no spaces, no quotes, no explanation.
+"""
+
+# Second pass when primary non-target classifier returned YES — reduces false Invalid on Central Thai.
+NON_TARGET_LANGUAGE_RECHECK_PROMPT = """
+A first-pass classifier may have marked this transcript as NON-TARGET (not Central Thai).
+Re-read the WHOLE transcript carefully.
+
+Answer YES (non-target) ONLY if the speech is STILL clearly a regional Thai DIALECT or a foreign language as defined below.
+
+Answer NO (Central Thai / in scope) if ANY of these apply — even if the first pass said YES:
+- Standard Central Thai weather forecast, news, or commentary (ลม, ฝน, พายุ, ไซโคลอน, ความกดอากาศ, ภาคอีสาน/เหนือ/ใต้ as geographic regions, ลมยก, ฝนฟ้าคะนอง).
+- Mentions of "อีสาน", "เหนือ", "ใต้" only as place/region names (ภาคอีสาน, พื้นที่อีสาน) without Isan dialect grammar or particles.
+- "นำให้", "นำไปสู่", "นำมาซึ่ง" or similar standard Central Thai (NOT Isan "นำ" = with/together).
+- Broadcast-style particles (ฮะ, นะฮะ, ครับ, ค่ะ) with otherwise standard vocabulary.
+- ASR spacing quirks (extra spaces between syllables) or broken loanword spelling — still Central Thai content.
+- Standard Thai with common English loanwords only.
+
+Answer YES only when dialect or foreign language remains CLEAR and DOMINANT after re-reading.
 
 Output ONLY the letters YES or NO. No punctuation, no spaces, no quotes, no explanation.
 """

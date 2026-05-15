@@ -574,6 +574,12 @@ async function postTranscribe(audioBase64) {
             qc.foreignScriptShare
         );
     }
+    if (qc.centralThaiRecheck) {
+        logParts.push(
+            "| centralThaiRecheck:",
+            qc.centralThaiRecheck.overturned ? "overturned" : "confirmed"
+        );
+    }
     console.log(...logParts);
     return { ok: true, data };
 }
@@ -4951,6 +4957,12 @@ setInterval(() => {
                                     qc.foreignScriptCount,
                                     "share:",
                                     qc.foreignScriptShare
+                                );
+                            }
+                            if (qc.centralThaiRecheck) {
+                                warnParts.push(
+                                    "recheck:",
+                                    qc.centralThaiRecheck.overturned ? "overturned" : "confirmed"
                                 );
                             }
                             warnParts.push("— ข้ามการวางข้อความ และคงค่าเดิมไว้");
