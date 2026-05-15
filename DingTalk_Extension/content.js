@@ -85,6 +85,295 @@ let orderBySortDescendingClicks = Math.min(
     Math.max(1, parseInt(localStorage.getItem("dingtag_order_by_sort_desc_clicks") || "1", 10) || 1)
 );
 
+/** โหมด extension: auto = pipeline เดิม | manual = ถอดเสียงมือ + วางข้อความเอง */
+let extensionMode = localStorage.getItem("dingtag_extension_mode") === "manual" ? "manual" : "auto";
+
+const MOUSE_BUTTON_LABELS = {
+    0: "Mouse1 (ซ้าย)",
+    1: "Mouse2 (กลาง)",
+    2: "Mouse3 (ขวา)",
+    3: "Mouse4 (Back)",
+    4: "Mouse5 (Forward)",
+};
+
+const DEFAULT_MANUAL_TRANSCRIBE_HOTKEY = {
+    inputType: "keyboard",
+    key: "F8",
+    code: "F8",
+    button: 0,
+    ctrl: false,
+    shift: false,
+    alt: false,
+    meta: false,
+};
+const DEFAULT_MANUAL_FORMALIZE_HOTKEY = {
+    inputType: "keyboard",
+    key: "F9",
+    code: "F9",
+    button: 0,
+    ctrl: false,
+    shift: false,
+    alt: false,
+    meta: false,
+};
+
+function normalizeManualHotkey(raw, defaults) {
+    const hk = { ...defaults, ...(raw || {}) };
+    if (!hk.inputType) {
+        hk.inputType = typeof hk.button === "number" && hk.button > 0 ? "mouse" : "keyboard";
+    }
+    return hk;
+}
+
+function loadManualHotkey(storageKey, defaults) {
+    try {
+        const raw = localStorage.getItem(storageKey);
+        if (!raw) return { ...defaults };
+        return normalizeManualHotkey(JSON.parse(raw), defaults);
+    } catch {
+        return { ...defaults };
+    }
+}
+
+let manualTranscribeHotkey = loadManualHotkey(
+    "dingtag_manual_hotkey",
+    DEFAULT_MANUAL_TRANSCRIBE_HOTKEY
+);
+let manualFormalizeHotkey = loadManualHotkey(
+    "dingtag_manual_formalize_hotkey",
+    DEFAULT_MANUAL_FORMALIZE_HOTKEY
+);
+let manualTranscribeInFlight = false;
+let manualFormalizeInFlight = false;
+/** null | "transcribe" | "formalize" — กำลังรอผู้ใช้กดคีย์/ปุ่มเมาส์เพื่อบันทึก */
+let hotkeyCaptureTarget = null;
+
+function manualModifiersMatch(e, hk) {
+    return (
+        !!e.ctrlKey === !!hk.ctrl &&
+        !!e.shiftKey === !!hk.shift &&
+        !!e.altKey === !!hk.alt &&
+        !!e.metaKey === !!hk.meta
+    );
+}
+
+function formatManualHotkeyLabel(hk = manualTranscribeHotkey) {
+    const parts = [];
+    if (hk.ctrl) parts.push("Ctrl");
+    if (hk.shift) parts.push("Shift");
+    if (hk.alt) parts.push("Alt");
+    if (hk.meta) parts.push("Meta");
+    if (hk.inputType === "mouse") {
+        parts.push(MOUSE_BUTTON_LABELS[hk.button] || `Mouse${(hk.button ?? 0) + 1}`);
+    } else {
+        parts.push(hk.key || "?");
+    }
+    return parts.join("+");
+}
+
+function manualHotkeyMatchesKeyboard(e, hk) {
+    if (hk.inputType === "mouse") return false;
+    const want = (hk.key || "").toLowerCase();
+    const got = (e.key || "").toLowerCase();
+    if (got !== want && e.code !== (hk.code || "")) return false;
+    return manualModifiersMatch(e, hk);
+}
+
+function manualHotkeyMatchesMouse(e, hk) {
+    if (hk.inputType !== "mouse") return false;
+    if (e.button !== hk.button) return false;
+    return manualModifiersMatch(e, hk);
+}
+
+function persistManualHotkey(target, hk) {
+    const normalized = normalizeManualHotkey(hk, target === "formalize" ? DEFAULT_MANUAL_FORMALIZE_HOTKEY : DEFAULT_MANUAL_TRANSCRIBE_HOTKEY);
+    if (target === "formalize") {
+        manualFormalizeHotkey = normalized;
+        localStorage.setItem("dingtag_manual_formalize_hotkey", JSON.stringify(manualFormalizeHotkey));
+    } else {
+        manualTranscribeHotkey = normalized;
+        localStorage.setItem("dingtag_manual_hotkey", JSON.stringify(manualTranscribeHotkey));
+    }
+}
+
+function startHotkeyCapture(target) {
+    hotkeyCaptureTarget = target === "formalize" ? "formalize" : "transcribe";
+    updateManualHotkeyLabels();
+    const label = target === "formalize" ? "จัดคำ" : "ถอดเสียง";
+    setManualStatus(`ตั้งคีย์ลัด${label}: กดคีย์บอร์ดหรือปุ่มเมาส์ (Esc ยกเลิก)`);
+}
+
+function cancelHotkeyCapture() {
+    if (!hotkeyCaptureTarget) return false;
+    hotkeyCaptureTarget = null;
+    updateManualHotkeyLabels();
+    return true;
+}
+
+function finishHotkeyCaptureFromKeyboard(e) {
+    if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return false;
+    persistManualHotkey(hotkeyCaptureTarget, {
+        inputType: "keyboard",
+        key: e.key,
+        code: e.code,
+        button: 0,
+        ctrl: e.ctrlKey,
+        shift: e.shiftKey,
+        alt: e.altKey,
+        meta: e.metaKey,
+    });
+    const saved = formatManualHotkeyLabel(
+        hotkeyCaptureTarget === "formalize" ? manualFormalizeHotkey : manualTranscribeHotkey
+    );
+    hotkeyCaptureTarget = null;
+    updateManualHotkeyLabels();
+    setManualStatus(`บันทึกคีย์ลัดแล้ว: ${saved}`);
+    return true;
+}
+
+function finishHotkeyCaptureFromMouse(e) {
+    persistManualHotkey(hotkeyCaptureTarget, {
+        inputType: "mouse",
+        button: e.button,
+        key: "",
+        code: "",
+        ctrl: e.ctrlKey,
+        shift: e.shiftKey,
+        alt: e.altKey,
+        meta: e.metaKey,
+    });
+    const saved = formatManualHotkeyLabel(
+        hotkeyCaptureTarget === "formalize" ? manualFormalizeHotkey : manualTranscribeHotkey
+    );
+    hotkeyCaptureTarget = null;
+    updateManualHotkeyLabels();
+    setManualStatus(`บันทึกคีย์ลัดแล้ว: ${saved}`);
+    return true;
+}
+
+async function waitForSelectorManual(selector, { timeoutMs = 8000, intervalMs = 200 } = {}) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const el = document.querySelector(selector);
+        if (el) return el;
+        await delay(intervalMs);
+    }
+    return null;
+}
+
+function isManualBusy() {
+    return manualTranscribeInFlight || manualFormalizeInFlight;
+}
+
+async function runManualTranscribe() {
+    if (extensionMode !== "manual" || isManualBusy()) return;
+    manualTranscribeInFlight = true;
+    try {
+        setManualStatus("กำลังถอดเสียง...");
+        let ta = findAnnotationResultTextarea();
+        if (!ta) {
+            ta = await waitForSelectorManual('textarea[name="Annotation Result"]', { timeoutMs: 6000 });
+        }
+        if (!ta) {
+            setManualStatus("ไม่พบช่อง Annotation Result");
+            return;
+        }
+        try {
+            ta.focus();
+        } catch {}
+        const audioBase64 = await fetchAudioAsBase64();
+        if (!audioBase64) {
+            setManualStatus("ไม่มีไฟล์เสียงบนหน้านี้");
+            return;
+        }
+        const apiResult = await postTranscribe(audioBase64);
+        if (!apiResult.ok) {
+            setManualStatus(
+                (apiResult.errorLabel || "API error") +
+                    " — " +
+                    String(apiResult.detail || "").slice(0, 80)
+            );
+            return;
+        }
+        const data = apiResult.data || {};
+        if (data.status === "paused") {
+            setManualStatus("API: ระบบ AI หยุดชั่วคราว");
+            return;
+        }
+        if (data.status === "error") {
+            setManualStatus("ถอดเสียงล้มเหลว: " + String(data.message || "").slice(0, 80));
+            return;
+        }
+        const text = data.text || "";
+        setTextareaValueAndNotify(ta, text);
+        setManualStatus(
+            `วางข้อความแล้ว (${text.length} ตัวอักษร) — ตรวจสอบแล้วกด Update เอง`
+        );
+        console.log("[DingTag Manual] ถอดเสียงและวางข้อความแล้ว | len=", text.length);
+    } catch (e) {
+        console.error("[DingTag Manual]", e);
+        setManualStatus("เกิดข้อผิดพลาด: " + (e?.message || "unknown"));
+    } finally {
+        manualTranscribeInFlight = false;
+    }
+}
+
+async function runManualFormalize() {
+    if (extensionMode !== "manual" || isManualBusy()) return;
+    manualFormalizeInFlight = true;
+    try {
+        setManualStatus("กำลังจัดคำ...");
+        let ta = findAnnotationResultTextarea();
+        if (!ta) {
+            ta = await waitForSelectorManual('textarea[name="Annotation Result"]', { timeoutMs: 6000 });
+        }
+        if (!ta) {
+            setManualStatus("ไม่พบช่อง Annotation Result");
+            return;
+        }
+        const source = (ta.value || "").trim();
+        if (!source) {
+            setManualStatus("ไม่มีข้อความในช่อง — ถอดเสียงก่อนจัดคำ");
+            return;
+        }
+        try {
+            ta.focus();
+        } catch {}
+        const formalResult = await postFormalize(source);
+        if (!formalResult.ok) {
+            setManualStatus(
+                (formalResult.errorLabel || "Formal API error") +
+                    " — " +
+                    String(formalResult.detail || "").slice(0, 80)
+            );
+            return;
+        }
+        const data = formalResult.data || {};
+        if (data.status === "paused") {
+            setManualStatus("Formal: ระบบ AI หยุดชั่วคราว");
+            return;
+        }
+        const formatted = (data.text || "").trim();
+        if (!formatted) {
+            setManualStatus("จัดคำแล้วแต่ผลลัพธ์ว่าง — ใช้ข้อความเดิม");
+            return;
+        }
+        setTextareaValueAndNotify(ta, formatted);
+        const fsp = ((data.qc || {}).formalSpacing || {});
+        setManualStatus(
+            fsp.spacingRefined
+                ? `จัดคำแล้ว (${formatted.length} ตัวอักษร, แก้เว้นวรรค) — ตรวจแล้วกด Update เอง`
+                : `จัดคำแล้ว (${formatted.length} ตัวอักษร) — ตรวจแล้วกด Update เอง`
+        );
+        console.log("[DingTag Manual] จัดคำแล้ว | len=", formatted.length);
+    } catch (e) {
+        console.error("[DingTag Manual] formalize", e);
+        setManualStatus("เกิดข้อผิดพลาด: " + (e?.message || "unknown"));
+    } finally {
+        manualFormalizeInFlight = false;
+    }
+}
+
 function clearAllTasks() {
     activeTimeouts.forEach(t => clearTimeout(t));
     activeTimeouts = [];
@@ -461,6 +750,41 @@ headerRow.appendChild(title);
 headerRow.appendChild(settingsBtn);
 panel.appendChild(headerRow);
 
+const modeSwitchRow = document.createElement("div");
+modeSwitchRow.style.display = "flex";
+modeSwitchRow.style.gap = "6px";
+modeSwitchRow.style.marginBottom = "10px";
+
+const modeAutoBtn = document.createElement("button");
+modeAutoBtn.type = "button";
+modeAutoBtn.innerText = "Auto";
+modeAutoBtn.style.flex = "1";
+modeAutoBtn.style.padding = "6px";
+modeAutoBtn.style.border = "none";
+modeAutoBtn.style.borderRadius = "6px";
+modeAutoBtn.style.cursor = "pointer";
+modeAutoBtn.style.fontSize = "12px";
+modeAutoBtn.style.fontWeight = "bold";
+
+const modeManualBtn = document.createElement("button");
+modeManualBtn.type = "button";
+modeManualBtn.innerText = "Manual";
+modeManualBtn.style.flex = "1";
+modeManualBtn.style.padding = "6px";
+modeManualBtn.style.border = "none";
+modeManualBtn.style.borderRadius = "6px";
+modeManualBtn.style.cursor = "pointer";
+modeManualBtn.style.fontSize = "12px";
+modeManualBtn.style.fontWeight = "bold";
+
+modeSwitchRow.appendChild(modeAutoBtn);
+modeSwitchRow.appendChild(modeManualBtn);
+panel.appendChild(modeSwitchRow);
+
+const autoView = document.createElement("div");
+const manualView = document.createElement("div");
+manualView.style.display = "none";
+
 const toggleBtn = document.createElement("button");
 toggleBtn.innerText = "OFF - คลิกเพื่อเปิด";
 toggleBtn.style.width = "100%";
@@ -470,7 +794,7 @@ toggleBtn.style.color = "white";
 toggleBtn.style.border = "none";
 toggleBtn.style.borderRadius = "6px";
 toggleBtn.style.cursor = "pointer";
-panel.appendChild(toggleBtn);
+autoView.appendChild(toggleBtn);
 
 const statusLabel = document.createElement("div");
 statusLabel.style.fontSize = "12px";
@@ -479,7 +803,7 @@ statusLabel.style.padding = "8px";
 statusLabel.style.borderRadius = "8px";
 statusLabel.style.backgroundColor = "#343a40";
 statusLabel.innerText = "สถานะ: OFF";
-panel.appendChild(statusLabel);
+autoView.appendChild(statusLabel);
 
 const settingsContainer = document.createElement("div");
 settingsContainer.style.marginTop = "10px";
@@ -846,8 +1170,237 @@ clearHistoryBtn.addEventListener("click", () => {
 });
 settingsContainer.appendChild(clearHistoryBtn);
 
-panel.appendChild(settingsContainer);
+autoView.appendChild(settingsContainer);
+
+const manualStatusLabel = document.createElement("div");
+manualStatusLabel.style.fontSize = "12px";
+manualStatusLabel.style.padding = "8px";
+manualStatusLabel.style.borderRadius = "8px";
+manualStatusLabel.style.backgroundColor = "#343a40";
+manualStatusLabel.style.lineHeight = "1.35";
+manualView.appendChild(manualStatusLabel);
+
+const manualTranscribeBtn = document.createElement("button");
+manualTranscribeBtn.type = "button";
+manualTranscribeBtn.innerText = "🎙️ ถอดเสียง (วางข้อความ)";
+manualTranscribeBtn.style.width = "100%";
+manualTranscribeBtn.style.marginTop = "10px";
+manualTranscribeBtn.style.padding = "10px";
+manualTranscribeBtn.style.border = "none";
+manualTranscribeBtn.style.borderRadius = "6px";
+manualTranscribeBtn.style.backgroundColor = "#0d6efd";
+manualTranscribeBtn.style.color = "white";
+manualTranscribeBtn.style.cursor = "pointer";
+manualTranscribeBtn.style.fontSize = "12px";
+manualTranscribeBtn.title = "ถอดเสียงจากไฟล์บนหน้า แล้ววางในช่อง Annotation";
+manualView.appendChild(manualTranscribeBtn);
+
+const manualTranscribeHotkeyLabel = document.createElement("div");
+manualTranscribeHotkeyLabel.style.fontSize = "11px";
+manualTranscribeHotkeyLabel.style.marginTop = "8px";
+manualTranscribeHotkeyLabel.style.opacity = "0.9";
+manualView.appendChild(manualTranscribeHotkeyLabel);
+
+const manualTranscribeHotkeyRow = document.createElement("div");
+manualTranscribeHotkeyRow.style.display = "flex";
+manualTranscribeHotkeyRow.style.gap = "6px";
+manualTranscribeHotkeyRow.style.marginTop = "4px";
+
+const manualTranscribeHotkeySetBtn = document.createElement("button");
+manualTranscribeHotkeySetBtn.type = "button";
+manualTranscribeHotkeySetBtn.innerText = "⌨️ ตั้งคีย์ลัดถอด";
+manualTranscribeHotkeySetBtn.style.flex = "1";
+manualTranscribeHotkeySetBtn.style.padding = "5px";
+manualTranscribeHotkeySetBtn.style.border = "1px solid #555";
+manualTranscribeHotkeySetBtn.style.borderRadius = "4px";
+manualTranscribeHotkeySetBtn.style.backgroundColor = "#2c3e50";
+manualTranscribeHotkeySetBtn.style.color = "#ecf0f1";
+manualTranscribeHotkeySetBtn.style.cursor = "pointer";
+manualTranscribeHotkeySetBtn.style.fontSize = "10px";
+
+const manualTranscribeHotkeyResetBtn = document.createElement("button");
+manualTranscribeHotkeyResetBtn.type = "button";
+manualTranscribeHotkeyResetBtn.innerText = "F8";
+manualTranscribeHotkeyResetBtn.title = "รีเซ็ตคีย์ลัดถอดเสียงเป็น F8";
+manualTranscribeHotkeyResetBtn.style.padding = "5px 8px";
+manualTranscribeHotkeyResetBtn.style.border = "1px solid #555";
+manualTranscribeHotkeyResetBtn.style.borderRadius = "4px";
+manualTranscribeHotkeyResetBtn.style.backgroundColor = "#343a40";
+manualTranscribeHotkeyResetBtn.style.color = "#ecf0f1";
+manualTranscribeHotkeyResetBtn.style.cursor = "pointer";
+manualTranscribeHotkeyResetBtn.style.fontSize = "10px";
+
+manualTranscribeHotkeyRow.appendChild(manualTranscribeHotkeySetBtn);
+manualTranscribeHotkeyRow.appendChild(manualTranscribeHotkeyResetBtn);
+manualView.appendChild(manualTranscribeHotkeyRow);
+
+const manualFormalizeBtn = document.createElement("button");
+manualFormalizeBtn.type = "button";
+manualFormalizeBtn.innerText = "✍️ จัดคำ (ข้อความในช่อง)";
+manualFormalizeBtn.style.width = "100%";
+manualFormalizeBtn.style.marginTop = "12px";
+manualFormalizeBtn.style.padding = "10px";
+manualFormalizeBtn.style.border = "none";
+manualFormalizeBtn.style.borderRadius = "6px";
+manualFormalizeBtn.style.backgroundColor = "#6f42c1";
+manualFormalizeBtn.style.color = "white";
+manualFormalizeBtn.style.cursor = "pointer";
+manualFormalizeBtn.style.fontSize = "12px";
+manualFormalizeBtn.title = "จัดคำข้อความในช่อง Annotation แล้ววางทับ";
+manualView.appendChild(manualFormalizeBtn);
+
+const manualFormalizeHotkeyLabel = document.createElement("div");
+manualFormalizeHotkeyLabel.style.fontSize = "11px";
+manualFormalizeHotkeyLabel.style.marginTop = "8px";
+manualFormalizeHotkeyLabel.style.opacity = "0.9";
+manualView.appendChild(manualFormalizeHotkeyLabel);
+
+const manualFormalizeHotkeyRow = document.createElement("div");
+manualFormalizeHotkeyRow.style.display = "flex";
+manualFormalizeHotkeyRow.style.gap = "6px";
+manualFormalizeHotkeyRow.style.marginTop = "4px";
+
+const manualFormalizeHotkeySetBtn = document.createElement("button");
+manualFormalizeHotkeySetBtn.type = "button";
+manualFormalizeHotkeySetBtn.innerText = "⌨️ ตั้งคีย์ลัดจัดคำ";
+manualFormalizeHotkeySetBtn.style.flex = "1";
+manualFormalizeHotkeySetBtn.style.padding = "5px";
+manualFormalizeHotkeySetBtn.style.border = "1px solid #555";
+manualFormalizeHotkeySetBtn.style.borderRadius = "4px";
+manualFormalizeHotkeySetBtn.style.backgroundColor = "#2c3e50";
+manualFormalizeHotkeySetBtn.style.color = "#ecf0f1";
+manualFormalizeHotkeySetBtn.style.cursor = "pointer";
+manualFormalizeHotkeySetBtn.style.fontSize = "10px";
+
+const manualFormalizeHotkeyResetBtn = document.createElement("button");
+manualFormalizeHotkeyResetBtn.type = "button";
+manualFormalizeHotkeyResetBtn.innerText = "F9";
+manualFormalizeHotkeyResetBtn.title = "รีเซ็ตคีย์ลัดจัดคำเป็น F9";
+manualFormalizeHotkeyResetBtn.style.padding = "5px 8px";
+manualFormalizeHotkeyResetBtn.style.border = "1px solid #555";
+manualFormalizeHotkeyResetBtn.style.borderRadius = "4px";
+manualFormalizeHotkeyResetBtn.style.backgroundColor = "#343a40";
+manualFormalizeHotkeyResetBtn.style.color = "#ecf0f1";
+manualFormalizeHotkeyResetBtn.style.cursor = "pointer";
+manualFormalizeHotkeyResetBtn.style.fontSize = "10px";
+
+manualFormalizeHotkeyRow.appendChild(manualFormalizeHotkeySetBtn);
+manualFormalizeHotkeyRow.appendChild(manualFormalizeHotkeyResetBtn);
+manualView.appendChild(manualFormalizeHotkeyRow);
+
+const manualHint = document.createElement("div");
+manualHint.style.fontSize = "10px";
+manualHint.style.marginTop = "10px";
+manualHint.style.opacity = "0.72";
+manualHint.style.lineHeight = "1.35";
+manualHint.innerText =
+    "Manual: ถอดเสียง → จัดคำ → ตรวจเอง → กด Update | ตั้งคีย์ลัดได้ทั้งคีย์บอร์ดและปุ่มเมาส์ (เช่น Forward)";
+manualView.appendChild(manualHint);
+
+panel.appendChild(autoView);
+panel.appendChild(manualView);
 document.body.appendChild(panel);
+
+function setManualStatus(text) {
+    manualStatusLabel.innerText = `สถานะ: ${text}`;
+}
+
+function updateManualHotkeyLabels() {
+    manualTranscribeHotkeyLabel.innerText = `คีย์ลัดถอดเสียง: ${formatManualHotkeyLabel(manualTranscribeHotkey)}`;
+    manualFormalizeHotkeyLabel.innerText = `คีย์ลัดจัดคำ: ${formatManualHotkeyLabel(manualFormalizeHotkey)}`;
+    const cap = hotkeyCaptureTarget;
+    manualTranscribeHotkeySetBtn.innerText =
+        cap === "transcribe" ? "กดคีย์/ปุ่มเมาส์…" : "⌨️ ตั้งคีย์ลัดถอด";
+    manualFormalizeHotkeySetBtn.innerText =
+        cap === "formalize" ? "กดคีย์/ปุ่มเมาส์…" : "⌨️ ตั้งคีย์ลัดจัดคำ";
+}
+
+function syncModeSwitchButtons() {
+    const isManual = extensionMode === "manual";
+    modeAutoBtn.style.backgroundColor = isManual ? "#343a40" : "#198754";
+    modeManualBtn.style.backgroundColor = isManual ? "#0d6efd" : "#343a40";
+    modeAutoBtn.style.color = "#fff";
+    modeManualBtn.style.color = "#fff";
+}
+
+function setExtensionMode(mode) {
+    const next = mode === "manual" ? "manual" : "auto";
+    if (extensionMode === next) return;
+    extensionMode = next;
+    localStorage.setItem("dingtag_extension_mode", extensionMode);
+    hotkeyCaptureTarget = null;
+    if (extensionMode === "manual" && isAutoPilotOn) {
+        isAutoPilotOn = false;
+        toggleBtn.innerText = "OFF - คลิกเพื่อเปิด";
+        toggleBtn.style.backgroundColor = "#dc3545";
+        clearAllTasks();
+        setStatus("OFF");
+    }
+    applyExtensionModeUI();
+    console.log("[DingTag] Extension mode:", extensionMode);
+}
+
+function applyExtensionModeUI() {
+    const isManual = extensionMode === "manual";
+    autoView.style.display = isManual ? "none" : "block";
+    manualView.style.display = isManual ? "block" : "none";
+    settingsBtn.style.display = isManual ? "none" : "flex";
+    title.innerText = isManual ? "✋ DingTalk Manual" : "🤖 DingTalk V21 (Local API)";
+    panel.style.width = isManual ? "280px" : "240px";
+    syncModeSwitchButtons();
+    updateManualHotkeyLabels();
+    if (isManual) {
+        settingsContainer.style.display = "none";
+        setManualStatus(
+            `พร้อม — ถอด: ${formatManualHotkeyLabel(manualTranscribeHotkey)} | จัดคำ: ${formatManualHotkeyLabel(manualFormalizeHotkey)}`
+        );
+    }
+}
+
+modeAutoBtn.addEventListener("click", () => setExtensionMode("auto"));
+modeManualBtn.addEventListener("click", () => setExtensionMode("manual"));
+
+manualTranscribeBtn.addEventListener("click", () => {
+    runManualTranscribe().catch((e) => console.warn("[DingTag Manual]", e?.message));
+});
+
+manualTranscribeHotkeySetBtn.addEventListener("click", () => {
+    if (hotkeyCaptureTarget === "transcribe") {
+        cancelHotkeyCapture();
+        setManualStatus("ยกเลิกการตั้งค่าคีย์ลัดถอดเสียง");
+    } else {
+        startHotkeyCapture("transcribe");
+    }
+});
+
+manualTranscribeHotkeyResetBtn.addEventListener("click", () => {
+    hotkeyCaptureTarget = null;
+    persistManualHotkey("transcribe", { ...DEFAULT_MANUAL_TRANSCRIBE_HOTKEY });
+    updateManualHotkeyLabels();
+    setManualStatus(`รีเซ็ตคีย์ลัดถอด: ${formatManualHotkeyLabel(manualTranscribeHotkey)}`);
+});
+
+manualFormalizeBtn.addEventListener("click", () => {
+    runManualFormalize().catch((e) => console.warn("[DingTag Manual] formalize:", e?.message));
+});
+
+manualFormalizeHotkeySetBtn.addEventListener("click", () => {
+    if (hotkeyCaptureTarget === "formalize") {
+        cancelHotkeyCapture();
+        setManualStatus("ยกเลิกการตั้งค่าคีย์ลัดจัดคำ");
+    } else {
+        startHotkeyCapture("formalize");
+    }
+});
+
+manualFormalizeHotkeyResetBtn.addEventListener("click", () => {
+    hotkeyCaptureTarget = null;
+    persistManualHotkey("formalize", { ...DEFAULT_MANUAL_FORMALIZE_HOTKEY });
+    updateManualHotkeyLabels();
+    setManualStatus(`รีเซ็ตคีย์ลัดจัดคำ: ${formatManualHotkeyLabel(manualFormalizeHotkey)}`);
+});
+
+applyExtensionModeUI();
 
 const PANEL_POS_STORAGE_KEY = "dingtag_panel_position";
 
@@ -3976,6 +4529,67 @@ async function runAutoFilterRecovery() {
     return true;
 }
 
+// Hotkey Manual mode: คีย์บอร์ด + ปุ่มเมาส์ (เช่น Forward = button 4)
+document.addEventListener(
+    "keydown",
+    (e) => {
+        if (hotkeyCaptureTarget) {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                cancelHotkeyCapture();
+                setManualStatus("ยกเลิกการตั้งค่าคีย์ลัด");
+                return;
+            }
+            if (finishHotkeyCaptureFromKeyboard(e)) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            return;
+        }
+        if (extensionMode !== "manual" || isManualBusy()) return;
+        if (manualHotkeyMatchesKeyboard(e, manualTranscribeHotkey)) {
+            e.preventDefault();
+            e.stopPropagation();
+            runManualTranscribe().catch((err) => console.warn("[DingTag Manual] hotkey transcribe:", err?.message));
+            return;
+        }
+        if (manualHotkeyMatchesKeyboard(e, manualFormalizeHotkey)) {
+            e.preventDefault();
+            e.stopPropagation();
+            runManualFormalize().catch((err) => console.warn("[DingTag Manual] hotkey formalize:", err?.message));
+        }
+    },
+    true
+);
+
+document.addEventListener(
+    "mousedown",
+    (e) => {
+        if (hotkeyCaptureTarget) {
+            if (e.button === 0 && panel.contains(e.target)) return;
+            if (finishHotkeyCaptureFromMouse(e)) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            return;
+        }
+        if (extensionMode !== "manual" || isManualBusy()) return;
+        if (manualHotkeyMatchesMouse(e, manualTranscribeHotkey)) {
+            e.preventDefault();
+            e.stopPropagation();
+            runManualTranscribe().catch((err) => console.warn("[DingTag Manual] mouse transcribe:", err?.message));
+            return;
+        }
+        if (manualHotkeyMatchesMouse(e, manualFormalizeHotkey)) {
+            e.preventDefault();
+            e.stopPropagation();
+            runManualFormalize().catch((err) => console.warn("[DingTag Manual] mouse formalize:", err?.message));
+        }
+    },
+    true
+);
+
 // Hotkey: Shift+ArrowUp → applyMyAnnotatorFilter
 // - ทำงานก็ต่อเมื่อ Auto-Filter toggle ON และเจอปุ่ม Filters บนหน้านี้
 // - ไม่ทำงานถ้ากำลังพิมพ์ในช่อง input/textarea/contenteditable (ปล่อยให้ event ผ่านไป)
@@ -3983,6 +4597,7 @@ async function runAutoFilterRecovery() {
 document.addEventListener(
     "keydown",
     (e) => {
+        if (extensionMode !== "auto") return;
         if (!e.shiftKey) return;
         if (e.key !== "ArrowUp") return;
         if (e.ctrlKey || e.altKey || e.metaKey) return;
@@ -4007,7 +4622,7 @@ document.addEventListener(
 );
 
 setInterval(() => {
-    if (!isAutoPilotOn || isProcessing) return;
+    if (extensionMode !== "auto" || !isAutoPilotOn || isProcessing) return;
     if (location.href !== lastSeenUrl) {
         const oldUrl = lastSeenUrl;
         lastSeenUrl = location.href;
