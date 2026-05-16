@@ -764,6 +764,26 @@ def collapse_overspaced_thai(text: str) -> str:
     return re.sub(r" +", " ", out).strip()
 
 
+# ตรวจรั่วเวลาแบบดิจิทัล (เช่น 10:00 น., 1930 น.) — log เตือนเมื่อ prompt ยังไม่กันได้
+_DIGITAL_TIME_HHMM_NA_RE = re.compile(r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\s*น\.?")
+_DIGITAL_TIME_COMPACT_NA_RE = re.compile(r"\b(?:[01]?\d|2[0-3])[0-5]\d\s*น\.?")
+
+
+def warn_digital_time_leak_if_any(text: str, stage: str) -> None:
+    """แจ้งใน console ถ้าผลลัพธ์มีรูปแบบเวลาดิจิทัล + น. (มักมาจาก โมง/ทุ่ม ถูกแปลงผิด)"""
+    t = (text or "").strip()
+    if not t:
+        return
+    m = _DIGITAL_TIME_HHMM_NA_RE.search(t) or _DIGITAL_TIME_COMPACT_NA_RE.search(t)
+    if not m:
+        return
+    snippet = m.group(0)
+    print(
+        f"[⚠️] Digital time leak ({stage}): พบ {snippet!r} — "
+        "ควรเป็นเวลาพูดไทย (โมง/ทุ่ม/ตี/เที่ยง/บ่าย) ไม่ใช่ HH:MM หรือ HHMM + น."
+    )
+
+
 def count_thai_letters(text: str) -> int:
     return sum(1 for c in (text or "") if "\u0e00" <= c <= "\u0e7f")
 
@@ -1693,6 +1713,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         result_text, hallu_meta = self._transcribe_with_hallucination_guard(
             audio_model, b64_clean, prompt_rules
         )
+        warn_digital_time_leak_if_any(result_text, "transcribe")
 
         aq = classify_transcript_audio_quality_qc(result_text or "")
         if aq.get("trigger"):
@@ -1775,6 +1796,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         formatted = strip_special_chars(formatted)
         formatted = force_single_line(formatted)
         formatted, spacing_meta = self._finalize_formatted_text(formatted)
+        warn_digital_time_leak_if_any(formatted, "formalize")
         _session_stats_record_formalize(time.time() - t0)
         out: dict[str, Any] = {"status": "success", "text": formatted, "formalModelUsed": formal_model}
         qc_out: dict[str, Any] = {}

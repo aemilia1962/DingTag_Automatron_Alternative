@@ -7,10 +7,15 @@
 # กฎห้ามแปลงเวลาพูด → รูปแบบดิจิทัล (ใช้ใน prompt ถอดเสียง + จัดคำ)
 NO_DIGITAL_TIME_RULE = """
 • NO DIGITAL TIME (ห้ามแปลงเวลาพูดเป็นรูปแบบดิจิทัล):
-  คงรูปแบบเวลาที่พูดจริง — ห้ามใช้ HH:MM, HH.MM หรือเติม "น." ถ้าไม่ได้พูด
-  ตัวอย่างที่ห้ามเปลี่ยน: "10 โมง" ห้ามเป็น "10:00" / "10:00 น." / "10.00 น."
-  "6 โมงเย็น" ห้ามเป็น "18:00" — ต้องคง "6 โมงเย็น"
-  แปลงจำนวนเป็นเลขอารบิกได้ (เช่น สิบโมง → 10 โมง) แต่ต้องมีคำว่า "โมง" / "โมงเช้า" / "โมงเย็น" ตามที่พูด
+  คงวลีเวลาไทยที่พูดจริง — ห้ามใช้ HH:MM, HH.MM, HHMM (เช่น 1930, 1030) หรือเติม "น." ถ้าไม่ได้พูด
+  คำเวลาไทยที่ต้องคงไว้เมื่อมีในคลิป: โมง, โมงเช้า, โมงเย็น, ทุ่ม, ตี, เที่ยง, บ่าย, ครึ่ง (ในบริบทเวลา)
+  ตัวอย่างที่ห้ามเปลี่ยน:
+    "10 โมง" ห้ามเป็น "10:00" / "10:00 น." / "1000 น." / "10.00 น."
+    "6 โมงเย็น" ห้ามเป็น "18:00" / "1800 น." — ต้องคง "6 โมงเย็น"
+    "หนึ่งทุ่ม" / "1 ทุ่ม" ห้ามเป็น "23:00" / "2300 น." / "1930" / "1930 น." / "19:30 น."
+    "สองทุ่ม" ห้ามเป็น "2000 น." หรือรูปแบบตัวเลข 4 หลักแทนคำว่า ทุ่ม
+  แปลงจำนวนเป็นเลขอารบิกได้ (สิบโมง → 10 โมง, หนึ่งทุ่ม → 1 ทุ่ม) แต่ต้องคงคำบอกเวลาไทย (โมง/ทุ่ม/ตี/เที่ยง/บ่าย) ตามที่พูด
+  อย่าสับสนกับปี ค.ศ.: "ปี ค.ศ. 1990" ใช้กฎปี — ห้ามเอา "หนึ่งทุ่ม" หรือ "ทุ่ม" ไปเขียนเป็น 1930
 """
 
 # ==========================================
@@ -31,7 +36,7 @@ You are a verbatim transcription engine. Write down EXACTLY what was spoken — 
 - Thai text: เขียนติดกันตามการสะกดปกติ — ห้ามเว้นวรรคทุกคำ/ทุกพยางค์แบบ "และ ค่าย ยาน ยนต์" (ASR spacing leak)
 - Single continuous paragraph — ห้ามขึ้นบรรทัดใหม่
 - NO timestamps (00:00, 00:01 etc.) — ห้ามสร้าง timestamp
-- NO DIGITAL TIME: ห้ามแปลงเวลาพูด (เช่น "10 โมง", "6 โมงเย็น") เป็น 10:00, 10:00 น., 18:00 ฯลฯ — ต้องคงคำว่า "โมง" และวลีเวลาตามที่พูด
+- NO DIGITAL TIME: ห้ามแปลงเวลาพูดเป็น 10:00, 1930 น., 2300 น. ฯลฯ — ต้องคง โมง/ทุ่ม/ตี/เที่ยง/บ่าย ตามที่พูด (เช่น "หนึ่งทุ่ม" ห้ามเป็น "1930 น.")
 - Keep filler words verbatim (e.g., เอ่อ, อ่า, อืม, แบบว่า, ครับ, ค่ะ, นะคะ, นะครับ)
 - Keep repeated words verbatim — ห้ามลบคำซ้ำ
 - Start directly with the first spoken word — ห้ามมีคำนำหรืออธิบาย
@@ -109,7 +114,7 @@ CRITICAL RULES:
 - CAPITALIZE FIRST LETTER OF ENGLISH SENTENCES ONLY
 - NEVER REMOVE OR ADD WORDS
 - NEVER ALTER SPELLING OR PUNCTUATION
-- NO DIGITAL TIME: ห้ามแปลงเวลาพูดเป็น 00:00 / 00.00 น. (เช่น "10 โมง" ต้องคง "10 โมง" ห้าม "10:00 น.")
+- NO DIGITAL TIME: ห้ามแปลงเวลาพูดเป็น 00:00 / 1930 น. / HHMM น. (เช่น "10 โมง", "1 ทุ่ม" ต้องคงคำเวลาไทย ห้าม "10:00 น." / "1930 น.")
 """ + NO_DIGITAL_TIME_RULE
 
 # ==========================================
@@ -122,7 +127,7 @@ You are a Thai typography fixer. The input text has ABNORMAL spacing: another mo
 Your ONLY job:
 1. Re-join Thai into normal readable spacing — words and short phrases together, like natural Thai writing.
 2. Preserve the EXACT same words in the EXACT same order. Do NOT add, remove, merge, or reorder any words. Do NOT summarize or change meaning.
-3. Keep numbers, English words, and abbreviations (e.g. KM, VIP) as-is; only fix spaces around them if needed. Do NOT convert spoken Thai time (e.g. "10 โมง") to digital forms like "10:00 น."
+3. Keep numbers, English words, and abbreviations (e.g. KM, VIP) as-is; only fix spaces around them if needed. Do NOT convert spoken Thai time (e.g. "10 โมง", "1 ทุ่ม") to digital forms like "10:00 น." or "1930 น."
 4. Output a single line. No quotes, no labels, no explanation.
 
 If the input is already reasonably spaced, return it unchanged (still one line).
