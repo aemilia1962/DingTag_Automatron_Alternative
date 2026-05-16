@@ -166,6 +166,10 @@ class TranscribeRequest(BaseModel):
 
 class FormalizeRequest(BaseModel):
     text: str = Field(..., description="Plain transcript text")
+    formalModel: str | None = Field(
+        None,
+        description="Optional OpenRouter model id (Manual extension); must be in allowlist or omitted.",
+    )
 
 
 class PhysicalClickRequest(BaseModel):
@@ -509,7 +513,7 @@ def api_formalize(body: FormalizeRequest):
     if inst is None or not inst.is_ai_active:
         return {"status": "paused"}
     try:
-        return inst.run_formalize_only(body.text)
+        return inst.run_formalize_only(body.text, formal_model_override=body.formalModel)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
     except Exception as e:
@@ -670,6 +674,29 @@ OPENROUTER_TEXT_MODELS = [
     "openai/gpt-4o-mini",
 ]
 DEFAULT_FORMAL_MODEL = "openai/gpt-4o-mini"
+
+# Extension Manual: เลือกโมเดลจัดคำได้ — อนุญาตเฉพาะ id เหล่านี้ (กันส่ง arbitrary model ไป OpenRouter)
+MANUAL_FORMAL_OVERRIDE_MODELS: frozenset[str] = frozenset(
+    {
+        "google/gemini-2.5-flash",
+        "google/gemini-3.1-flash-lite-preview",
+        "openai/gpt-4o-mini",
+    }
+)
+
+
+def resolve_formal_model_for_api_request(default_formal: str, override: str | None) -> str:
+    """คืนโมเดล formal ที่จะเรียกจริง — override ต้องอยู่ใน MANUAL_FORMAL_OVERRIDE_MODELS"""
+    if override is None:
+        return default_formal
+    s = str(override).strip()
+    if not s:
+        return default_formal
+    if s in MANUAL_FORMAL_OVERRIDE_MODELS:
+        return s
+    allowed = ", ".join(sorted(MANUAL_FORMAL_OVERRIDE_MODELS))
+    raise ValueError(f"formalModel ไม่รองรับ: {s!r} — ใช้ได้เฉพาะ: {allowed}")
+
 
 MODERATION_MODEL = "openai/gpt-4o-mini"
 
@@ -1717,11 +1744,12 @@ class AITranscriberApp(AppUI, ctk.CTk):
         _session_stats_record_transcribe(time.time() - t0)
         return {"status": "success", "text": result_text, "isSensitive": is_sensitive, "qc": qc}
 
-    def run_formalize_only(self, text: str) -> dict:
+    def run_formalize_only(self, text: str, formal_model_override: str | None = None) -> dict:
         """Step 2: formalize only (expects raw already shown to user)."""
         t0 = time.time()
         with self._models_lock:
-            formal_model = self.formal_model
+            default_formal = self.formal_model
+        formal_model = resolve_formal_model_for_api_request(default_formal, formal_model_override)
 
         cleaned = force_single_line(text or "")
         cleaned = re.sub(r"[()]", "", cleaned)
@@ -1729,7 +1757,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         cleaned = force_single_line(cleaned)
         if not cleaned:
             _session_stats_record_formalize(time.time() - t0)
-            return {"status": "success", "text": ""}
+            return {"status": "success", "text": "", "formalModelUsed": formal_model}
 
         max_out = min(8192, max(512, int(len(cleaned) * 1.5) + 400))
         formatted_raw = chat_completion_with_retry(
@@ -1748,7 +1776,7 @@ class AITranscriberApp(AppUI, ctk.CTk):
         formatted = force_single_line(formatted)
         formatted, spacing_meta = self._finalize_formatted_text(formatted)
         _session_stats_record_formalize(time.time() - t0)
-        out: dict[str, Any] = {"status": "success", "text": formatted}
+        out: dict[str, Any] = {"status": "success", "text": formatted, "formalModelUsed": formal_model}
         qc_out: dict[str, Any] = {}
         if spacing_meta.get("spacingRefined") or spacing_meta.get("reason"):
             qc_out["formalSpacing"] = spacing_meta

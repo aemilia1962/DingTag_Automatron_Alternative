@@ -88,6 +88,29 @@ let orderBySortDescendingClicks = Math.min(
 /** โหมด extension: auto = pipeline เดิม | manual = ถอดเสียงมือ + วางข้อความเอง */
 let extensionMode = localStorage.getItem("dingtag_extension_mode") === "manual" ? "manual" : "auto";
 
+/** Manual เท่านั้น: โมเดลจัดคำ — id ต้องตรง whitelist ใน aibot_dingver (MANUAL_FORMAL_OVERRIDE_MODELS) */
+const MANUAL_FORMAL_MODEL_OPTIONS = [
+    { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    { id: "google/gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash Lite (preview)" },
+    { id: "openai/gpt-4o-mini", label: "GPT-4o mini" },
+];
+const MANUAL_FORMAL_MODEL_STORAGE_KEY = "dingtag_manual_formal_model";
+const DEFAULT_MANUAL_FORMAL_MODEL_ID = "openai/gpt-4o-mini";
+
+function getManualFormalModelId() {
+    const raw = (localStorage.getItem(MANUAL_FORMAL_MODEL_STORAGE_KEY) || "").trim();
+    if (raw && MANUAL_FORMAL_MODEL_OPTIONS.some((o) => o.id === raw)) {
+        return raw;
+    }
+    return DEFAULT_MANUAL_FORMAL_MODEL_ID;
+}
+
+function manualFormalModelShortLabel(modelId) {
+    const id = String(modelId || "").trim();
+    const hit = MANUAL_FORMAL_MODEL_OPTIONS.find((o) => o.id === id);
+    return hit ? hit.label : id || "?";
+}
+
 const MOUSE_BUTTON_LABELS = {
     0: "Mouse1 (ซ้าย)",
     1: "Mouse2 (กลาง)",
@@ -339,7 +362,7 @@ async function runManualFormalize() {
         try {
             ta.focus();
         } catch {}
-        const formalResult = await postFormalize(source);
+        const formalResult = await postFormalize(source, getManualFormalModelId());
         if (!formalResult.ok) {
             setManualStatus(
                 (formalResult.errorLabel || "Formal API error") +
@@ -360,12 +383,14 @@ async function runManualFormalize() {
         }
         setTextareaValueAndNotify(ta, formatted);
         const fsp = ((data.qc || {}).formalSpacing || {});
+        const usedId = String(data.formalModelUsed || getManualFormalModelId() || "").trim();
+        const modelTag = manualFormalModelShortLabel(usedId);
         setManualStatus(
             fsp.spacingRefined
-                ? `จัดคำแล้ว (${formatted.length} ตัวอักษร, แก้เว้นวรรค) — ตรวจแล้วกด Update เอง`
-                : `จัดคำแล้ว (${formatted.length} ตัวอักษร) — ตรวจแล้วกด Update เอง`
+                ? `จัดคำแล้ว (${formatted.length} ตัวอักษร, ${modelTag}, แก้เว้นวรรค) — ตรวจแล้วกด Update เอง`
+                : `จัดคำแล้ว (${formatted.length} ตัวอักษร, ${modelTag}) — ตรวจแล้วกด Update เอง`
         );
-        console.log("[DingTag Manual] จัดคำแล้ว | len=", formatted.length);
+        console.log("[DingTag Manual] จัดคำแล้ว | model=", usedId, "| len=", formatted.length);
     } catch (e) {
         console.error("[DingTag Manual] formalize", e);
         setManualStatus("เกิดข้อผิดพลาด: " + (e?.message || "unknown"));
@@ -584,9 +609,13 @@ async function postTranscribe(audioBase64) {
     return { ok: true, data };
 }
 
-/** สั่ง formal จัดคำจากข้อความที่มีอยู่แล้ว */
-async function postFormalize(text) {
-    const payload = JSON.stringify({ text });
+/** สั่ง formal จัดคำจากข้อความที่มีอยู่แล้ว — formalModelOverride ส่งได้เฉพาะ id ใน MANUAL_FORMAL_MODEL_OPTIONS */
+async function postFormalize(text, formalModelOverride) {
+    const body = { text };
+    if (formalModelOverride) {
+        body.formalModel = formalModelOverride;
+    }
+    const payload = JSON.stringify(body);
     const kb = Math.round(payload.length / 1024);
     console.log("[DingTag] กำลัง POST formalize ไปยัง", LOCAL_FORMALIZE_URL, "| ขนาด body ~" + kb + " KB");
 
@@ -1255,6 +1284,36 @@ manualFormalizeBtn.style.fontSize = "12px";
 manualFormalizeBtn.title = "จัดคำข้อความในช่อง Annotation แล้ววางทับ";
 manualView.appendChild(manualFormalizeBtn);
 
+const manualFormalModelLabel = document.createElement("div");
+manualFormalModelLabel.style.fontSize = "10px";
+manualFormalModelLabel.style.marginTop = "8px";
+manualFormalModelLabel.style.opacity = "0.88";
+manualFormalModelLabel.innerText = "โมเดลจัดคำ (Manual)";
+manualView.appendChild(manualFormalModelLabel);
+
+const manualFormalModelSelect = document.createElement("select");
+manualFormalModelSelect.id = "dingtag-manual-formal-model";
+manualFormalModelSelect.style.width = "100%";
+manualFormalModelSelect.style.marginTop = "4px";
+manualFormalModelSelect.style.padding = "6px 8px";
+manualFormalModelSelect.style.borderRadius = "6px";
+manualFormalModelSelect.style.border = "1px solid #555";
+manualFormalModelSelect.style.backgroundColor = "#2c3e50";
+manualFormalModelSelect.style.color = "#ecf0f1";
+manualFormalModelSelect.style.fontSize = "11px";
+manualFormalModelSelect.style.cursor = "pointer";
+for (const opt of MANUAL_FORMAL_MODEL_OPTIONS) {
+    const o = document.createElement("option");
+    o.value = opt.id;
+    o.textContent = opt.label;
+    manualFormalModelSelect.appendChild(o);
+}
+manualFormalModelSelect.value = getManualFormalModelId();
+manualFormalModelSelect.addEventListener("change", () => {
+    localStorage.setItem(MANUAL_FORMAL_MODEL_STORAGE_KEY, manualFormalModelSelect.value);
+});
+manualView.appendChild(manualFormalModelSelect);
+
 const manualFormalizeHotkeyLabel = document.createElement("div");
 manualFormalizeHotkeyLabel.style.fontSize = "11px";
 manualFormalizeHotkeyLabel.style.marginTop = "8px";
@@ -1357,6 +1416,9 @@ function applyExtensionModeUI() {
     updateManualHotkeyLabels();
     if (isManual) {
         settingsContainer.style.display = "none";
+        if (manualFormalModelSelect) {
+            manualFormalModelSelect.value = getManualFormalModelId();
+        }
         setManualStatus(
             `พร้อม — ถอด: ${formatManualHotkeyLabel(manualTranscribeHotkey)} | จัดคำ: ${formatManualHotkeyLabel(manualFormalizeHotkey)}`
         );
