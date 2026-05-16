@@ -3644,6 +3644,51 @@ function findAnnotatorRow(rows) {
     return null;
 }
 
+/** สรุปสั้นๆ สำหรับ status bar เวลา "ไม่เจอ target" — อ่านจาก DOM (ไม่เปิด panel เอง) */
+function getNoTargetFilterStatusHint() {
+    if (filterApplyInFlight) {
+        return "กำลังตั้ง Filter...";
+    }
+    const username = (filterAnnotatorUsername || "").trim();
+    if (!isFilterButtonPresent()) {
+        return "หน้านี้ไม่มีปุ่ม Filters — เปิดหน้ารายการ Tasks";
+    }
+    const filterBtn = document.querySelector('button[aria-label="Filters"]');
+    const panelExpanded = filterBtn?.getAttribute("aria-expanded") === "true";
+    const rows = parseFilterRows();
+    const ann = findAnnotatorRow(rows);
+
+    if (rows.length === 0 && !panelExpanded) {
+        return (
+            "ไม่เห็นแถว filter (panel ปิด) — กด Filters ตรวจว่ามี Annotators / Does not contain / " +
+            (username || "(ตั้งชื่อใน Settings)")
+        );
+    }
+    if (!ann) {
+        if (rows.length > 0) {
+            return "มี filter แต่ไม่มีแถว Annotators";
+        }
+        return "ยังไม่เห็นแถว filter ใน DOM";
+    }
+    const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const opOk = norm(ann.operator) === norm("Does not contain");
+    const valOk = username ? norm(ann.value) === norm(username) : false;
+
+    let core;
+    if (!username) {
+        core = "มีแถว Annotators แต่ยังไม่ได้ตั้งชื่อ exclude ใน Settings";
+    } else if (opOk && valOk) {
+        core = "Annotators filter ตรง Settings ✓";
+    } else if (!opOk) {
+        core = "Annotators: operator ไม่ใช่ Does not contain";
+    } else {
+        core = "Annotators: ค่าไม่ตรงชื่อใน Settings";
+    }
+
+    const auto = autoFilterEnabled ? "Auto-Filter ON" : "Auto-Filter OFF";
+    return `${core} · ${auto}`;
+}
+
 /** หาว่ามี filter "Platform Acceptance Status" อยู่หรือยัง
  *  ใช้ .lsf-filterLine DOM structure แทนการนับ trigger index
  *  เพราะแถว 2+ มี conjunction trigger ("and") และ "Is empty" ไม่มี value trigger
@@ -5267,7 +5312,7 @@ setInterval(() => {
                     console.log(
                         `⏳ task ใหม่ (${currentTaskId}) ยังไม่เจอ Classification — รอสูงสุด ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ ก่อน Shift+↓`
                     );
-                    setStatus(`task ${currentTaskId}: รอ Classification...`);
+                    setStatus(`task ${currentTaskId}: รอ Classification... · ${getNoTargetFilterStatusHint()}`);
                 } else {
                     const waited = now - noClassificationStartedAt;
                     if (waited >= noClassificationTimeoutMs) {
@@ -5305,7 +5350,7 @@ setInterval(() => {
                             `⏳ รอ Classification ใน task ${currentTaskId} อีก ~${remaining.toFixed(1)} วิ ก่อน Shift+↓`
                         );
                         setStatus(
-                            `task ${currentTaskId}: รอ Classification (${remaining.toFixed(1)} วิ)`
+                            `task ${currentTaskId}: รอ Classification (${remaining.toFixed(1)} วิ) · ${getNoTargetFilterStatusHint()}`
                         );
                     }
                 }
@@ -5318,9 +5363,13 @@ setInterval(() => {
                 if (now - lastNoTargetLogAt > 5000) {
                     lastNoTargetLogAt = now;
                     console.log(
-                        "⏳ ON อยู่ แต่ยังไม่เจอ target (Classification: Valid/Invalid) — ตรวจหน้าเว็บ/DOM/สิทธิ์ Extension"
+                        "⏳ ON อยู่ แต่ยังไม่เจอ target (Classification: Valid/Invalid) — ตรวจหน้าเว็บ/DOM/สิทธิ์ Extension |",
+                        getNoTargetFilterStatusHint()
                     );
-                    setStatus("ยังไม่เจอ target (รอ Classification Valid/Invalid...)");
+                    setStatus(
+                        "ยังไม่เจอ target (รอ Classification Valid/Invalid...) · " +
+                            getNoTargetFilterStatusHint()
+                    );
                 }
 
                 // ─────── Auto-Filter recovery: ถ้า bot ไม่เจอ target นาน → apply filter อัตโนมัติ ───────
