@@ -4,6 +4,15 @@
 # File: prompts.py
 # คำอธิบาย: รวม Prompt ทั้งหมดไว้ในไฟล์เดียว เพื่อการแก้ไขที่สะดวก
 
+# กฎห้ามแปลงเวลาพูด → รูปแบบดิจิทัล (ใช้ใน prompt ถอดเสียง + จัดคำ)
+NO_DIGITAL_TIME_RULE = """
+• NO DIGITAL TIME (ห้ามแปลงเวลาพูดเป็นรูปแบบดิจิทัล):
+  คงรูปแบบเวลาที่พูดจริง — ห้ามใช้ HH:MM, HH.MM หรือเติม "น." ถ้าไม่ได้พูด
+  ตัวอย่างที่ห้ามเปลี่ยน: "10 โมง" ห้ามเป็น "10:00" / "10:00 น." / "10.00 น."
+  "6 โมงเย็น" ห้ามเป็น "18:00" — ต้องคง "6 โมงเย็น"
+  แปลงจำนวนเป็นเลขอารบิกได้ (เช่น สิบโมง → 10 โมง) แต่ต้องมีคำว่า "โมง" / "โมงเช้า" / "โมงเย็น" ตามที่พูด
+"""
+
 # ==========================================
 # 1. DingTalk Voice - Transcription Prompt
 # ==========================================
@@ -22,6 +31,7 @@ You are a verbatim transcription engine. Write down EXACTLY what was spoken — 
 - Thai text: เขียนติดกันตามการสะกดปกติ — ห้ามเว้นวรรคทุกคำ/ทุกพยางค์แบบ "และ ค่าย ยาน ยนต์" (ASR spacing leak)
 - Single continuous paragraph — ห้ามขึ้นบรรทัดใหม่
 - NO timestamps (00:00, 00:01 etc.) — ห้ามสร้าง timestamp
+- NO DIGITAL TIME: ห้ามแปลงเวลาพูด (เช่น "10 โมง", "6 โมงเย็น") เป็น 10:00, 10:00 น., 18:00 ฯลฯ — ต้องคงคำว่า "โมง" และวลีเวลาตามที่พูด
 - Keep filler words verbatim (e.g., เอ่อ, อ่า, อืม, แบบว่า, ครับ, ค่ะ, นะคะ, นะครับ)
 - Keep repeated words verbatim — ห้ามลบคำซ้ำ
 - Start directly with the first spoken word — ห้ามมีคำนำหรืออธิบาย
@@ -37,7 +47,7 @@ You are a verbatim transcription engine. Write down EXACTLY what was spoken — 
 • NO FRACTIONS: ห้ามแปลงคำว่า "ครึ่ง" หรือ "เสี้ยว" เป็นเศษส่วน 1/2 หรือ 0.5 เด็ดขาด (ตัวอย่าง: "ชั่วโมงครึ่ง" ให้เขียน "1 ชั่วโมงครึ่ง" ห้ามเขียน "1 1/2")
 • ห้ามแปลงคำถามจำนวน เช่น "กี่" เป็นตัวเลข
 • "ปี ค.ศ. หนึ่งเก้าศูนย์เก้า "ต้องเขียนเป็น "ปี ค.ศ. 1990" ห้ามตัด ค.ศ. ออก
-"""
+""" + NO_DIGITAL_TIME_RULE
 
 # ==========================================
 # 2. Transcript Formatting Instruction
@@ -99,7 +109,8 @@ CRITICAL RULES:
 - CAPITALIZE FIRST LETTER OF ENGLISH SENTENCES ONLY
 - NEVER REMOVE OR ADD WORDS
 - NEVER ALTER SPELLING OR PUNCTUATION
-"""
+- NO DIGITAL TIME: ห้ามแปลงเวลาพูดเป็น 00:00 / 00.00 น. (เช่น "10 โมง" ต้องคง "10 โมง" ห้าม "10:00 น.")
+""" + NO_DIGITAL_TIME_RULE
 
 # ==========================================
 # 3b. Fix over-spaced formal output (GPT-4o-mini spacing leak)
@@ -111,7 +122,7 @@ You are a Thai typography fixer. The input text has ABNORMAL spacing: another mo
 Your ONLY job:
 1. Re-join Thai into normal readable spacing — words and short phrases together, like natural Thai writing.
 2. Preserve the EXACT same words in the EXACT same order. Do NOT add, remove, merge, or reorder any words. Do NOT summarize or change meaning.
-3. Keep numbers, English words, and abbreviations (e.g. KM, VIP) as-is; only fix spaces around them if needed.
+3. Keep numbers, English words, and abbreviations (e.g. KM, VIP) as-is; only fix spaces around them if needed. Do NOT convert spoken Thai time (e.g. "10 โมง") to digital forms like "10:00 น."
 4. Output a single line. No quotes, no labels, no explanation.
 
 If the input is already reasonably spaced, return it unchanged (still one line).
