@@ -235,6 +235,28 @@ Output ONLY the letters YES or NO. No punctuation, no spaces, no quotes, no expl
 """
 
 # ==========================================
+# 5b. Audio presence QC (ฟังไฟล์เสียงจริง — ก่อนถอดเสียง)
+# ==========================================
+AUDIO_PRESENCE_QC_PROMPT = """
+You listen to ONE short audio clip from a call-center labeling workflow.
+
+Reply with EXACTLY ONE token (no other text):
+
+OK — Clear human speech is present; there is NO continuous gap of 2.5 seconds or more without human speech; clip is not dominated by static/wind/machinery noise alone.
+
+BAD_SILENCE — There is a continuous stretch of about 2.5 seconds or more with no human speech (dead air, hold tone only, or true silence between speech).
+
+BAD_NOISE — Dominated by loud background noise, static, wind, crowd, or mechanical sound with little or no clear intelligible human speech.
+
+BAD_NO_SPEECH — Essentially no human speech at all (empty, hum/beep only, or unusable for transcription).
+
+Rules:
+- Judge the AUDIO you hear, not assumptions.
+- If unsure between OK and any BAD_* → choose the BAD_* that fits best (do not default to OK).
+- Output ONLY one of: OK, BAD_SILENCE, BAD_NOISE, BAD_NO_SPEECH
+"""
+
+# ==========================================
 # 6. Transcript-only audio / usability QC (noise, no speech, unintelligible)
 # ==========================================
 # ใช้หลัง ASR — ไม่ได้ฟังไฟล์เสียง แค่ดูข้อความถอดเสียง (และกรณีว่าง = ไม่มีเนื้อหา)

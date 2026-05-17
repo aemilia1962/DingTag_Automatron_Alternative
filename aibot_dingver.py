@@ -13,6 +13,7 @@ import threading
 import urllib.request
 import urllib.error
 import subprocess
+import shutil
 from typing import Any
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -141,6 +142,7 @@ from prompts import (
     NON_TARGET_LANGUAGE_PROMPT,
     NON_TARGET_LANGUAGE_RECHECK_PROMPT,
     AUDIO_QUALITY_QC_PROMPT,
+    AUDIO_PRESENCE_QC_PROMPT,
 )
 from aibot_gui import AppUI
 
@@ -314,51 +316,123 @@ def _is_probably_wav(raw: bytes) -> bool:
     return raw[0:4] == b"RIFF" and raw[8:12] == b"WAVE"
 
 
-# ช่วงเงียบ / พลังงานต่ำต่อเนื่องยาวเกินค่านี้ → ส่ง qc.longSilence.trigger (ให้ Extension ไป Invalid Data Missing)
+# ช่วงเงียบ / ไม่มีเสียงพูดต่อเนื่องยาวเกินค่านี้ → ส่ง qc.longSilence / audioQuality
 LONG_SILENCE_TRIGGER_SEC = 2.5
+# สัดส่วนก้อนเสียงที่ถือว่า "มีพลังงานพูด" ต่ำกว่านี้ → สงสัยไม่มีคนพูด (ก่อนเรียก AI ฟังเสียง)
+MIN_SPEECH_FRAME_RATIO = 0.07
 # ความละเอียดวิเคราะห์ RMS ต่อก้อน (วินาที)
 _SILENCE_FRAME_SEC = 0.05
-# RMS ต่อก้อน int16: ถือว่า "เงียบ" ถ้าต่ำกว่า max(พื้นสัมบูรณ์, สัดส่วนของ peak ในไฟล์)
 _SILENCE_ABS_RMS = 80.0
-_SILENCE_REL_TO_PEAK = 0.06
+_SILENCE_REL_TO_PEAK = 0.08
 
 
-def analyze_wav_longest_silence_run_seconds(raw_bytes: bytes) -> tuple[float, dict[str, Any]]:
-    """ประเมินความยาว (วินาที) ของช่วงที่พลังงานต่ำต่อเนื่องยาวที่สุดใน WAV PCM 16-bit
-
-    ใช้ RMS ต่อก้อน ~50ms; ก้อนถือว่าเงียบถ้า RMS < max(_SILENCE_ABS_RMS, _SILENCE_REL_TO_PEAK * peak_rms)
-    คืน (longest_run_seconds, meta) — ถ้า parse ไม่ได้ meta['ok']=False (ไม่ trigger ฝั่ง caller)
-    """
-    meta: dict[str, Any] = {"ok": False, "reason": "init"}
-    if not raw_bytes or len(raw_bytes) < 44:
-        meta["reason"] = "too_short"
-        return 0.0, meta
+def _ffmpeg_convert_to_wav_pcm16_mono(raw_bytes: bytes) -> bytes | None:
+    """แปลงไฟล์เสียงใดๆ ที่ ffmpeg รองรับ → WAV PCM 16-bit mono 16kHz (ถ้ามี ffmpeg ใน PATH)"""
+    if not shutil.which("ffmpeg"):
+        return None
     try:
-        bio = io.BytesIO(raw_bytes)
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                "pipe:0",
+                "-f",
+                "wav",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                "pipe:1",
+            ],
+            input=raw_bytes,
+            capture_output=True,
+            timeout=45,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"[audio_gate] ffmpeg error: {e!r}")
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        err = (proc.stderr or b"").decode("utf-8", errors="replace")[:200]
+        print(f"[audio_gate] ffmpeg failed rc={proc.returncode}: {err}")
+        return None
+    return proc.stdout
+
+
+def normalize_audio_to_wav_pcm16_mono(raw_bytes: bytes) -> tuple[bytes | None, dict[str, Any]]:
+    """พยายามได้ WAV PCM 16-bit mono สำหรับวิเคราะห์ RMS / ส่ง ASR — คืน (wav_bytes, meta)"""
+    meta: dict[str, Any] = {"ok": False, "reason": "init", "source": ""}
+    if not raw_bytes:
+        meta["reason"] = "empty"
+        return None, meta
+
+    if _is_probably_wav(raw_bytes):
+        try:
+            bio = io.BytesIO(raw_bytes)
+            with wave.open(bio, "rb") as wf:
+                if wf.getcomptype() == "NONE" and wf.getsampwidth() == 2 and wf.getnchannels() >= 1:
+                    meta["ok"] = True
+                    meta["source"] = "wave_native"
+                    meta["reason"] = "already_pcm_wav"
+                    return raw_bytes, meta
+        except Exception:
+            pass
+
+    converted = _ffmpeg_convert_to_wav_pcm16_mono(raw_bytes)
+    if converted and _is_probably_wav(converted):
+        meta["ok"] = True
+        meta["source"] = "ffmpeg"
+        meta["reason"] = "converted"
+        return converted, meta
+
+    if _is_probably_wav(raw_bytes):
+        meta["ok"] = True
+        meta["source"] = "wave_raw"
+        meta["reason"] = "wav_header_non_pcm"
+        return raw_bytes, meta
+
+    meta["reason"] = "no_decoder_install_ffmpeg_for_mp3"
+    if not shutil.which("ffmpeg"):
+        print(
+            "[audio_gate] ⚠️ ไม่พบ ffmpeg ใน PATH — ไฟล์ MP3/WebM จากเบราว์เซอร์อาจวิเคราะห์ RMS ไม่ได้ "
+            "(จะพึ่ง AI ฟังเสียงแทน)"
+        )
+    return None, meta
+
+
+def _read_wav_mono_samples(wav_bytes: bytes) -> tuple[list[float], int, dict[str, Any]]:
+    """อ่าน WAV → รายการ sample mono float + sample rate"""
+    meta: dict[str, Any] = {"ok": False, "reason": "init"}
+    if not wav_bytes or len(wav_bytes) < 44:
+        meta["reason"] = "too_short"
+        return [], 0, meta
+    try:
+        bio = io.BytesIO(wav_bytes)
         with wave.open(bio, "rb") as wf:
             if wf.getcomptype() != "NONE":
                 meta["reason"] = f"comptype_{wf.getcomptype()}"
-                return 0.0, meta
+                return [], 0, meta
             sw = wf.getsampwidth()
             ch = wf.getnchannels()
             rate = wf.getframerate()
-            if sw != 2 or ch < 1 or ch > 8:
-                meta["reason"] = f"unsupported_sw{sw}_ch{ch}"
-                return 0.0, meta
-            if rate <= 0:
-                meta["reason"] = "bad_rate"
-                return 0.0, meta
+            if sw != 2 or ch < 1 or ch > 8 or rate <= 0:
+                meta["reason"] = f"unsupported_sw{sw}_ch{ch}_rate{rate}"
+                return [], 0, meta
             frames_bytes = wf.readframes(wf.getnframes())
     except Exception as e:
         meta["reason"] = f"wave_error:{e}"
-        return 0.0, meta
+        return [], 0, meta
 
     group_bytes = sw * ch
     nbytes = (len(frames_bytes) // group_bytes) * group_bytes
     if nbytes < group_bytes:
         meta["ok"] = True
         meta["reason"] = "no_samples"
-        return 0.0, meta
+        return [], rate, meta
 
     n_groups = nbytes // group_bytes
     fmt = "<" + str(n_groups * ch) + "h"
@@ -366,15 +440,27 @@ def analyze_wav_longest_silence_run_seconds(raw_bytes: bytes) -> tuple[float, di
         flat = struct.unpack(fmt, frames_bytes[:nbytes])
     except struct.error as e:
         meta["reason"] = f"unpack:{e}"
-        return 0.0, meta
+        return [], 0, meta
 
     mono: list[float] = []
     for i in range(n_groups):
         base = i * ch
-        s = 0.0
-        for c in range(ch):
-            s += float(flat[base + c])
-        mono.append(s / float(ch))
+        s = sum(float(flat[base + c]) for c in range(ch)) / float(ch)
+        mono.append(s)
+
+    meta["ok"] = True
+    meta["reason"] = "read_ok"
+    meta["numSamples"] = len(mono)
+    return mono, rate, meta
+
+
+def analyze_pcm_wav_silence_and_speech(wav_bytes: bytes) -> tuple[float, float, dict[str, Any]]:
+    """คืน (longest_silence_sec, speech_frame_ratio, meta) จาก WAV PCM"""
+    meta: dict[str, Any] = {"ok": False, "reason": "init"}
+    mono, rate, rmeta = _read_wav_mono_samples(wav_bytes)
+    if not rmeta.get("ok") or not mono or rate <= 0:
+        meta.update(rmeta)
+        return 0.0, 0.0, meta
 
     frame_n = max(1, int(round(float(rate) * _SILENCE_FRAME_SEC)))
     frame_rms: list[float] = []
@@ -388,31 +474,213 @@ def analyze_wav_longest_silence_run_seconds(raw_bytes: bytes) -> tuple[float, di
     if not frame_rms:
         meta["ok"] = True
         meta["reason"] = "no_frames"
-        return 0.0, meta
+        return 0.0, 0.0, meta
 
     peak_rms = max(frame_rms) or 1e-9
-    thresh = max(_SILENCE_ABS_RMS, _SILENCE_REL_TO_PEAK * peak_rms)
-    silent_flags = [rms < thresh for rms in frame_rms]
+    sorted_rms = sorted(frame_rms)
+    median_rms = sorted_rms[len(sorted_rms) // 2]
+    silent_thresh = max(_SILENCE_ABS_RMS, _SILENCE_REL_TO_PEAK * peak_rms, median_rms * 0.4)
+    speech_thresh = max(_SILENCE_ABS_RMS * 2.5, peak_rms * 0.16, median_rms * 1.5)
 
     longest = 0
     cur = 0
-    for flag in silent_flags:
-        if flag:
+    speech_n = 0
+    for rms in frame_rms:
+        if rms < silent_thresh:
             cur += 1
-            if cur > longest:
-                longest = cur
+            longest = max(longest, cur)
         else:
             cur = 0
+        if rms > speech_thresh:
+            speech_n += 1
 
     frame_dur = frame_n / float(rate)
     longest_sec = longest * frame_dur
+    speech_ratio = speech_n / float(len(frame_rms))
+    duration_sec = len(mono) / float(rate)
+
     meta["ok"] = True
     meta["reason"] = "computed"
     meta["peakRms"] = round(peak_rms, 2)
-    meta["thresholdRms"] = round(thresh, 2)
+    meta["medianRms"] = round(median_rms, 2)
+    meta["silentThresh"] = round(silent_thresh, 2)
+    meta["speechThresh"] = round(speech_thresh, 2)
     meta["frameDurSec"] = round(frame_dur, 4)
     meta["numFrames"] = len(frame_rms)
-    return longest_sec, meta
+    meta["durationSec"] = round(duration_sec, 3)
+    meta["speechFrameRatio"] = round(speech_ratio, 4)
+    return longest_sec, speech_ratio, meta
+
+
+def analyze_wav_longest_silence_run_seconds(raw_bytes: bytes) -> tuple[float, dict[str, Any]]:
+    """Backward-compatible wrapper — แปลงเสียงเป็น WAV ก่อนวิเคราะห์ถ้าจำเป็น"""
+    wav_bytes, norm = normalize_audio_to_wav_pcm16_mono(raw_bytes)
+    target = wav_bytes if wav_bytes else raw_bytes
+    sil_sec, _speech_ratio, ameta = analyze_pcm_wav_silence_and_speech(target)
+    if not ameta.get("ok"):
+        ameta["normalize"] = norm
+        return 0.0, ameta
+    ameta["normalize"] = norm
+    return sil_sec, ameta
+
+
+def parse_audio_presence_verdict(content: str) -> str:
+    """OK | BAD_SILENCE | BAD_NOISE | BAD_NO_SPEECH | UNKNOWN"""
+    t = (content or "").strip().upper()
+    line0 = t.split("\n")[0].strip() if t else ""
+    joined = re.sub(r"\s+", " ", t)
+    for code in ("BAD_SILENCE", "BAD_NOISE", "BAD_NO_SPEECH"):
+        if code in joined or code in line0:
+            return code
+    tok = line0.split()[0] if line0 else ""
+    if tok in ("BAD_SILENCE", "BAD_NOISE", "BAD_NO_SPEECH"):
+        return tok
+    if tok == "OK" or line0.startswith("OK"):
+        return "OK"
+    return "UNKNOWN"
+
+
+def classify_audio_presence_with_llm(
+    oa_client: OpenAI,
+    audio_model: str,
+    audio_b64: str,
+    *,
+    audio_format: str = "wav",
+) -> dict[str, Any]:
+    """ฟังไฟล์เสียงด้วยโมเดลเดียวกับ ASR — จับเงียบยาว / noise / ไม่มีคนพูด"""
+    out: dict[str, Any] = {
+        "trigger": False,
+        "category": "OK",
+        "source": "audio_llm",
+        "llmRaw": "",
+    }
+    try:
+        raw = (
+            oa_client.chat.completions.create(
+                model=audio_model or DEFAULT_AUDIO_MODEL,
+                max_tokens=24,
+                temperature=0.0,
+                timeout=60,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": AUDIO_PRESENCE_QC_PROMPT},
+                            {
+                                "type": "input_audio",
+                                "input_audio": {"data": audio_b64, "format": audio_format},
+                            },
+                        ],
+                    }
+                ],
+            ).choices[0].message.content
+            or ""
+        )
+    except Exception as e:
+        print(f"[audio_presence] LLM error: {e!r} — fail-open (OK)")
+        out["source"] = "audio_llm_error"
+        out["llmRaw"] = str(e)[:200]
+        return out
+
+    out["llmRaw"] = (raw or "").strip()[:400]
+    code = parse_audio_presence_verdict(raw or "")
+    if code.startswith("BAD_"):
+        out["trigger"] = True
+        out["category"] = code
+    elif code == "UNKNOWN":
+        print(f"[audio_presence] parse UNKNOWN — fail-open | raw≈{out['llmRaw'][:80]!r}")
+    return out
+
+
+def _should_run_audio_presence_llm(
+    ameta: dict[str, Any], silence_sec: float, speech_ratio: float, norm: dict[str, Any]
+) -> bool:
+    if not norm.get("ok"):
+        return True
+    if not ameta.get("ok"):
+        return True
+    if silence_sec >= LONG_SILENCE_TRIGGER_SEC:
+        return False
+    if speech_ratio < 0.18:
+        return True
+    if silence_sec >= 1.0:
+        return True
+    return False
+
+
+def run_audio_preflight_gate(raw_bytes: bytes, audio_model: str) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
+    """ตรวจก่อน ASR — คืน (response ถ้าต้องส่ง Data Missing, base64 สำหรับ ASR, meta ภายใน)
+
+    ลำดับ: แปลง WAV → RMS (เงียบยาว / พูดน้อย) → AI ฟังเสียง (เมื่อสงสัยหรือแปลงไฟล์ไม่ได้)
+    """
+    gate_meta: dict[str, Any] = {"path": "ok"}
+    wav_bytes, norm = normalize_audio_to_wav_pcm16_mono(raw_bytes)
+    b64_for_asr = base64.b64encode(wav_bytes or raw_bytes).decode("ascii")
+    gate_meta["normalize"] = norm
+
+    silence_sec = 0.0
+    speech_ratio = 1.0
+    ameta: dict[str, Any] = {"ok": False}
+    if wav_bytes:
+        silence_sec, speech_ratio, ameta = analyze_pcm_wav_silence_and_speech(wav_bytes)
+        print(
+            f"[audio_gate] RMS longest_silence={silence_sec:.2f}s "
+            f"speech_ratio={speech_ratio:.1%} dur={ameta.get('durationSec')}s "
+            f"src={norm.get('source')}"
+        )
+        if ameta.get("ok") and silence_sec >= LONG_SILENCE_TRIGGER_SEC:
+            gate_meta["path"] = "rms_long_silence"
+            return (
+                _response_long_silence_data_missing(silence_sec, {**ameta, "normalize": norm}),
+                b64_for_asr,
+                gate_meta,
+            )
+        if (
+            ameta.get("ok")
+            and speech_ratio < MIN_SPEECH_FRAME_RATIO
+            and float(ameta.get("durationSec") or 0) >= 1.0
+        ):
+            gate_meta["path"] = "rms_low_speech"
+            print(
+                f"[audio_gate] พลังงานพูดต่ำมาก ({speech_ratio:.1%} < {MIN_SPEECH_FRAME_RATIO:.0%}) "
+                "→ BAD_NO_SPEECH"
+            )
+            return (
+                _response_audio_quality_bad("BAD_NO_SPEECH", {}, "heuristic_low_speech_energy"),
+                b64_for_asr,
+                gate_meta,
+            )
+    else:
+        print(
+            f"[audio_gate] ⚠️ ไม่สามารถแปลงเป็น WAV PCM ได้ ({norm.get('reason')}) — "
+            "จะใช้ AI ฟังเสียง"
+        )
+
+    if _should_run_audio_presence_llm(ameta, silence_sec, speech_ratio, norm):
+        ap = classify_audio_presence_with_llm(
+            client, audio_model, b64_for_asr, audio_format="wav"
+        )
+        gate_meta["audioPresence"] = ap
+        if ap.get("trigger"):
+            code = str(ap.get("category") or "BAD_UNINTELLIGIBLE")
+            print(f"[audio_gate] AI ฟังเสียง → {code} | raw≈{ap.get('llmRaw', '')[:60]!r}")
+            gate_meta["path"] = f"llm_{code}"
+            if code == "BAD_SILENCE":
+                return (
+                    _response_long_silence_data_missing(
+                        max(silence_sec, LONG_SILENCE_TRIGGER_SEC),
+                        {**ameta, "normalize": norm, "audioPresence": ap},
+                    ),
+                    b64_for_asr,
+                    gate_meta,
+                )
+            return (
+                _response_audio_quality_bad(code, {}, str(ap.get("llmRaw") or "")),
+                b64_for_asr,
+                gate_meta,
+            )
+
+    return None, b64_for_asr, gate_meta
 
 
 def _response_long_silence_data_missing(longest_sec: float, silence_meta: dict[str, Any]) -> dict[str, Any]:
@@ -1568,10 +1836,11 @@ class AITranscriberApp(AppUI, ctk.CTk):
         if not raw_bytes:
             raise ValueError("Empty audio payload")
         if not _is_probably_wav(raw_bytes):
-            # Don't hard-fail (some callers might send non-standard headers), but flag it clearly.
-            print("[API] ⚠️ ไฟล์เสียงอาจไม่ใช่ WAV (RIFF/WAVE header ไม่ตรง)")
+            print("[API] ⚠️ ไฟล์เสียงอาจไม่ใช่ WAV (RIFF/WAVE header ไม่ตรง) — จะพยายามแปลง/ffmpeg")
 
-        b64_clean = base64.b64encode(raw_bytes).decode("ascii")
+        blocked, b64_clean, _gate_meta = run_audio_preflight_gate(raw_bytes, audio_model)
+        if blocked is not None:
+            return blocked
 
         prompt_rules = (
             DINGTALK_PROMPT
@@ -1697,18 +1966,14 @@ class AITranscriberApp(AppUI, ctk.CTk):
         if not raw_bytes:
             raise ValueError("Empty audio payload")
         if not _is_probably_wav(raw_bytes):
-            print("[API] ⚠️ ไฟล์เสียงอาจไม่ใช่ WAV (RIFF/WAVE header ไม่ตรง)")
+            print("[API] ⚠️ ไฟล์เสียงอาจไม่ใช่ WAV (RIFF/WAVE header ไม่ตรง) — จะพยายามแปลง/ffmpeg")
 
-        silence_sec, silence_meta = analyze_wav_longest_silence_run_seconds(raw_bytes)
-        if silence_meta.get("ok") and silence_sec >= LONG_SILENCE_TRIGGER_SEC:
-            print(
-                f"[API] ช่วงเงียบ/พลังงานต่ำต่อเนื่อง {silence_sec:.2f}s ≥ {LONG_SILENCE_TRIGGER_SEC}s "
-                "→ ข้าม ASR, ส่ง longSilence (Data Missing)"
-            )
+        blocked, b64_clean, gate_meta = run_audio_preflight_gate(raw_bytes, audio_model)
+        if blocked is not None:
+            print(f"[API] audio preflight → {gate_meta.get('path')} (ข้าม ASR)")
             _session_stats_record_transcribe(time.time() - t0)
-            return _response_long_silence_data_missing(silence_sec, silence_meta)
+            return blocked
 
-        b64_clean = base64.b64encode(raw_bytes).decode("ascii")
         prompt_rules = DINGTALK_PROMPT + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
         result_text, hallu_meta = self._transcribe_with_hallucination_guard(
             audio_model, b64_clean, prompt_rules
@@ -1826,14 +2091,19 @@ class AITranscriberApp(AppUI, ctk.CTk):
             if not _is_probably_wav(raw_bytes):
                 _job_update(job_id, step="validated", message="ตรวจสอบเสียงแล้ว (แต่ header WAV ไม่ตรง)")
 
-            silence_sec, silence_meta = analyze_wav_longest_silence_run_seconds(raw_bytes)
-            if silence_meta.get("ok") and silence_sec >= LONG_SILENCE_TRIGGER_SEC:
-                out = _response_long_silence_data_missing(silence_sec, silence_meta)
+            with self._models_lock:
+                audio_model = self.audio_model
+                formal_model = self.formal_model
+
+            blocked, b64_clean, gate_meta = run_audio_preflight_gate(raw_bytes, audio_model)
+            if blocked is not None:
+                path = gate_meta.get("path") or "preflight"
+                out = blocked
                 _job_update(
                     job_id,
                     status="success",
                     step="done",
-                    message=f"ช่วงเงียบยาว {silence_sec:.1f}s — ข้าม ASR (Data Missing)",
+                    message=f"audio preflight {path} — ข้าม ASR (Data Missing)",
                     finishedAt=time.time(),
                     result=out,
                     isSensitive=False,
@@ -1841,12 +2111,6 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 )
                 _session_stats_record_transcribe(time.time() - t0)
                 return
-
-            with self._models_lock:
-                audio_model = self.audio_model
-                formal_model = self.formal_model
-
-            b64_clean = base64.b64encode(raw_bytes).decode("ascii")
 
             _job_update(job_id, step="transcribe", message="กำลังถอดเสียงเป็นข้อความ...")
             prompt_rules = DINGTALK_PROMPT + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
