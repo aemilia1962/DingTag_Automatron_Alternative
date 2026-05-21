@@ -1,4 +1,4 @@
-console.log("🚀 DingTalk Auto-Pilot V21 (Local API) Loaded!");
+﻿console.log("🚀 DingTalk Auto-Pilot V21 (Local API) Loaded!");
 
 const LOCAL_TRANSCRIBE_URL = "http://127.0.0.1:54321/api/transcribe";
 const LOCAL_FORMALIZE_URL = "http://127.0.0.1:54321/api/formalize";
@@ -870,7 +870,7 @@ autoSkipRow.style.marginTop = "10px";
 settingsContainer.appendChild(autoSkipRow);
 
 const autoSkipLabel = document.createElement("label");
-autoSkipLabel.innerText = "⏭️ Auto-Skip (ไม่มี Classification)";
+autoSkipLabel.innerText = "🎚️ Waveform recovery (ไม่มี Classification)";
 autoSkipLabel.style.fontSize = "12px";
 autoSkipLabel.style.cursor = "pointer";
 autoSkipRow.appendChild(autoSkipLabel);
@@ -879,7 +879,8 @@ const autoSkipToggle = document.createElement("input");
 autoSkipToggle.type = "checkbox";
 autoSkipToggle.checked = autoSkipNoClassificationEnabled;
 autoSkipToggle.style.cursor = "pointer";
-autoSkipToggle.title = "ถ้า task ใหม่ไม่มี Classification ภายในเวลาที่ตั้ง → Shift+↓ ข้าม";
+autoSkipToggle.title =
+    "ถ้า task ใหม่ไม่มี Classification ภายในเวลาที่ตั้ง → ลาก waveform → กด Valid → pipeline ปกติ (ล้มเหลวจึง Shift+↓)";
 autoSkipRow.appendChild(autoSkipToggle);
 
 autoSkipLabel.addEventListener("click", () => {
@@ -893,7 +894,7 @@ autoSkipToggle.addEventListener("change", () => {
         "dingtag_auto_skip_no_classification",
         autoSkipNoClassificationEnabled ? "1" : "0"
     );
-    console.log("[DingTag] Auto-skip (no Classification):", autoSkipNoClassificationEnabled ? "ON" : "OFF");
+    console.log("[DingTag] Waveform recovery (no Classification):", autoSkipNoClassificationEnabled ? "ON" : "OFF");
 });
 
 const autoSkipTimeoutLabel = document.createElement("div");
@@ -907,7 +908,7 @@ autoSkipTimeoutSlider.max = "30000";
 autoSkipTimeoutSlider.step = "500";
 autoSkipTimeoutSlider.value = String(noClassificationTimeoutMs);
 autoSkipTimeoutSlider.style.width = "100%";
-autoSkipTimeoutSlider.title = "รอ Classification นานสุดเท่านี้ ก่อน Shift+↓ ข้าม";
+autoSkipTimeoutSlider.title = "รอ Classification นานสุดเท่านี้ ก่อนเริ่ม waveform recovery";
 settingsContainer.appendChild(autoSkipTimeoutSlider);
 
 autoSkipTimeoutSlider.addEventListener("input", (e) => {
@@ -1568,7 +1569,7 @@ function updateLabels() {
         minElapsedBeforeAcceptMs <= 0
             ? `🛡️ ก่อนกด Accept อย่างน้อย: ปิด (ไม่บังคับ)`
             : `🛡️ ก่อนกด Accept อย่างน้อย: ${(minElapsedBeforeAcceptMs / 1000).toFixed(0)} วิ (งานเร็วเกินจะรอให้ครบ)`;
-    autoSkipTimeoutLabel.innerText = `⏭️ Auto-Skip timeout: ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ`;
+    autoSkipTimeoutLabel.innerText = `🎚️ Waveform recovery timeout: ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ`;
     stuckTaskLabel.innerText = `🔄 Stuck Task timeout: ${(stuckTaskTimeoutMs / 1000).toFixed(0)} วิ`;
 }
 updateLabels();
@@ -2107,6 +2108,302 @@ function fireFullMouseClick(el) {
     } catch (e) {
         console.warn("[DingTag] fireFullMouseClick error:", e?.name, e?.message);
         return false;
+    }
+}
+
+/** อ่าน Classification Valid/Invalid จาก sidebar (ใช้ร่วม polling + recovery) */
+function scanClassificationTarget() {
+    let targetEl = null;
+    let classificationValue = "";
+    const items = document.querySelectorAll(".lsf-annotation-items__result-item");
+    for (const item of items) {
+        const label = item.querySelector(".lsf-annotation-items__result-label");
+        if (!label?.textContent?.includes("Classification")) continue;
+        const valueEl = item.querySelector(".lsf-annotation-items__result-value");
+        if (!valueEl) continue;
+        const valueText = (valueEl.textContent || "").trim().toLowerCase();
+        if (valueText === "valid" || valueText === "invalid") {
+            targetEl = valueEl.querySelector("em") || valueEl;
+            classificationValue = valueText;
+            break;
+        }
+    }
+    return targetEl ? { targetEl, classificationValue } : null;
+}
+
+function findWaveformCanvas() {
+    return (
+        document.querySelector("#waveform-layer-main") ||
+        document.querySelector('canvas[id*="waveform-layer"]') ||
+        document.querySelector('canvas[id*="waveform"]')
+    );
+}
+
+function dispatchPointerMouseChain(el, type, x, y, buttons = 0) {
+    if (!el) return;
+    const base = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+        screenX: x,
+        screenY: y,
+        button: 0,
+        buttons,
+    };
+    const ptrBase = {
+        ...base,
+        pointerType: "mouse",
+        pointerId: 1,
+        isPrimary: true,
+        pressure: buttons ? 0.5 : 0,
+        width: 1,
+        height: 1,
+    };
+    const safe = (evt) => {
+        try {
+            el.dispatchEvent(evt);
+        } catch {}
+    };
+    const ptr = (t) => {
+        try {
+            return new PointerEvent(t, ptrBase);
+        } catch {
+            return new MouseEvent(t, base);
+        }
+    };
+    if (type === "down") {
+        safe(ptr("pointerdown"));
+        safe(new MouseEvent("mousedown", { ...base, buttons: 1 }));
+    } else if (type === "move") {
+        safe(ptr("pointermove"));
+        safe(new MouseEvent("mousemove", { ...base, buttons: 1 }));
+    } else if (type === "up") {
+        safe(ptr("pointerup"));
+        safe(new MouseEvent("mouseup", { ...base, buttons: 0 }));
+    }
+}
+
+/** ลากเมาส์บน element จาก (x0,y0) ถึง (x1,y1) — client coordinates */
+function dispatchDragOnElement(el, x0, y0, x1, y1, steps = 12) {
+    if (!el) return false;
+    try {
+        el.scrollIntoView?.({ block: "center", inline: "nearest" });
+    } catch {}
+    dispatchPointerMouseChain(el, "down", x0, y0, 1);
+    const n = Math.max(2, steps);
+    for (let i = 1; i <= n; i++) {
+        const t = i / n;
+        const x = x0 + (x1 - x0) * t;
+        const y = y0 + (y1 - y0) * t;
+        dispatchPointerMouseChain(el, "move", x, y, 1);
+    }
+    dispatchPointerMouseChain(el, "up", x1, y1, 0);
+    return true;
+}
+
+/** ลากเต็มความกว้าง waveform canvas (ซ้าย→ขวา) */
+async function dragWaveformFull({ startRatio = 0.02, endRatio = 0.98, steps = 14 } = {}) {
+    const canvas = findWaveformCanvas();
+    if (!canvas) {
+        console.warn("[DingTag] dragWaveformFull: ไม่พบ waveform canvas");
+        return { ok: false, reason: "no_canvas" };
+    }
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+        return { ok: false, reason: "zero_size" };
+    }
+    const y = rect.top + rect.height / 2;
+    const xStart = rect.left + rect.width * startRatio;
+    const xEnd = rect.left + rect.width * endRatio;
+    dispatchDragOnElement(canvas, xStart, y, xEnd, y, steps);
+    console.log(
+        `[DingTag] ลาก waveform เต็มช่วง @ (${xStart.toFixed(0)},${y.toFixed(0)}) → (${xEnd.toFixed(0)},${y.toFixed(0)})`
+    );
+    return { ok: true, reason: "dragged" };
+}
+
+async function waitForClassificationRow(timeoutMs = 8000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const row = findClassificationResultRow();
+        if (row) return row;
+        if (!isAutoPilotOn) return null;
+        await delay(250);
+    }
+    return findClassificationResultRow();
+}
+
+async function waitForClassificationTarget(timeoutMs = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const hit = scanClassificationTarget();
+        if (hit) return hit;
+        if (!isAutoPilotOn) return null;
+        await delay(250);
+    }
+    return scanClassificationTarget();
+}
+
+/**
+ * กดปุ่ม Valid บน waveform / label bar (span.lsf-label_clickable + .lsf-label__text)
+ * ใช้หลังลาก waveform เต็มช่วงเมื่อยังไม่มี Classification ใน sidebar
+ */
+function clickWaveformValidLabel() {
+    const labels = document.querySelectorAll(
+        "span.lsf-label.lsf-label_clickable, .lsf-label.lsf-label_clickable"
+    );
+    for (const label of labels) {
+        const textEl = label.querySelector(".lsf-label__text");
+        const text = (textEl?.textContent || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase();
+        if (text !== "valid") continue;
+        try {
+            label.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+        if (fireFullMouseClick(label)) {
+            return { ok: true, reason: "lsf_label_full_mouse" };
+        }
+        try {
+            label.click();
+            return { ok: true, reason: "lsf_label_click" };
+        } catch (e) {
+            console.warn("[DingTag] clickWaveformValidLabel:", e?.name, e?.message);
+        }
+    }
+    for (const textEl of document.querySelectorAll(".lsf-label__text")) {
+        const t = (textEl.textContent || "").trim().toLowerCase();
+        if (t !== "valid") continue;
+        const label = textEl.closest(".lsf-label_clickable, span.lsf-label, .lsf-label");
+        if (!label) continue;
+        try {
+            label.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+        if (fireFullMouseClick(label)) {
+            return { ok: true, reason: "lsf_label__text_parent" };
+        }
+    }
+    if (clickExactClassificationChoice("valid")) {
+        return { ok: true, reason: "exact_choice" };
+    }
+    if (forceClickByText(["Valid"])) {
+        return { ok: true, reason: "force_text" };
+    }
+    return { ok: false, reason: "valid_label_not_found" };
+}
+
+/** เปิด dropdown Classification แล้วเลือก Invalid */
+async function setClassificationToInvalid() {
+    const row = await waitForClassificationRow(10000);
+    if (!row) {
+        return { ok: false, reason: "no_classification_row" };
+    }
+    fireFullMouseClick(row);
+    await delay(400);
+    if (clickExactClassificationChoice("invalid")) {
+        await delay(500);
+        const hit = scanClassificationTarget();
+        if (hit?.classificationValue === "invalid") {
+            return { ok: true, reason: "exact_choice" };
+        }
+    }
+    const valEl = row.querySelector(".lsf-annotation-items__result-value");
+    if (valEl) fireFullMouseClick(valEl);
+    await delay(350);
+    if (forceClickByText(["Invalid"])) {
+        await delay(500);
+        return { ok: true, reason: "force_text" };
+    }
+    const hit = scanClassificationTarget();
+    if (hit?.classificationValue === "invalid") {
+        return { ok: true, reason: "verified_invalid" };
+    }
+    return { ok: false, reason: "invalid_not_set" };
+}
+
+function clickClassificationFocus() {
+    const hit = scanClassificationTarget();
+    if (hit?.targetEl) {
+        fireFullMouseClick(hit.targetEl);
+        return true;
+    }
+    const row = findClassificationResultRow();
+    if (row) {
+        fireFullMouseClick(row);
+        return true;
+    }
+    return refocusClassification();
+}
+
+async function fallbackSkipNoClassification(taskId) {
+    lastProcessedTaskId = taskId;
+    const sent = await goToNextTask({ runToken: null });
+    if (sent) {
+        console.log(`⏭️ no-classification fallback: Shift+↓ จาก task ${taskId}`);
+    } else {
+        console.warn(`⚠️ no-classification fallback: Shift+↓ ไม่สำเร็จ (task ${taskId})`);
+    }
+    await delay(800);
+}
+
+/**
+ * ไม่เจอ Classification: ลาก waveform เต็มช่วง → กด Valid (lsf-label) → pipeline Classification ปกติ
+ */
+async function runNoClassificationRecoveryFlow(currentTaskId) {
+    const pipelineTaskId = currentTaskId;
+    const runToken = ++runTokenCounter;
+    activeRunToken = runToken;
+    const cycleStartAt = Date.now();
+    lastProcessedTaskId = pipelineTaskId;
+    noClassificationTaskId = "";
+    noClassificationStartedAt = 0;
+
+    try {
+        setStatus(`task ${pipelineTaskId}: ลาก waveform...`);
+        scrollSidebarToActiveTask();
+        await delay(READ_DELAY_MS);
+        if (!isRunActive(runToken)) return;
+
+        const dragRes = await dragWaveformFull();
+        if (!dragRes.ok) {
+            setStatus(`ลาก waveform ไม่ได้ (${dragRes.reason}) → Shift+↓`);
+            await fallbackSkipNoClassification(pipelineTaskId);
+            return;
+        }
+        await delay(600);
+        if (!isRunActive(runToken)) return;
+
+        setStatus("recovery: กด Valid...");
+        const validRes = clickWaveformValidLabel();
+        if (!validRes.ok) {
+            console.warn("[DingTag] recovery กด Valid ไม่สำเร็จ:", validRes.reason);
+            setStatus(`กด Valid ไม่สำเร็จ → Shift+↓`);
+            await fallbackSkipNoClassification(pipelineTaskId);
+            return;
+        }
+        console.log("✅ recovery: กด Valid แล้ว (" + validRes.reason + ")");
+        await delay(800);
+        if (!isRunActive(runToken)) return;
+
+        const scanned = await waitForClassificationTarget(10000);
+        if (!scanned) {
+            console.warn("[DingTag] recovery: sidebar ยังไม่แสดง Classification Valid — ลอง pipeline ต่อ");
+        }
+
+        setStatus("recovery: เข้า pipeline Classification ปกติ...");
+        await runTranscriptionPipeline(runToken, cycleStartAt, pipelineTaskId, {
+            classificationValue: scanned?.classificationValue || "valid",
+            skipInitialClassificationClick: false,
+            forceTranscribeFromInvalid: false,
+        });
+    } catch (e) {
+        console.error("[DingTag] no-classification recovery:", e);
+        setStatus("recovery error → Shift+↓");
+        await fallbackSkipNoClassification(pipelineTaskId);
     }
 }
 
@@ -3290,7 +3587,7 @@ async function runInvalidNonTargetLanguageAcceptFlow(
 function clickExactClassificationChoice(exactLower) {
     const want = String(exactLower).toLowerCase();
     const candidates = document.querySelectorAll(
-        '[role="option"], [role="menuitem"], .ant-select-item-option-content, .ant-select-item, li.lsf-label, button'
+        '[role="option"], [role="menuitem"], .ant-select-item-option-content, .ant-select-item, li.lsf-label, span.lsf-label, button'
     );
     for (const el of candidates) {
         const raw = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
@@ -4734,6 +5031,383 @@ document.addEventListener(
     true
 );
 
+/**
+ * Pipeline หลัก: Classification → (Invalid→Valid ถ้าต้อง) → ถอดเสียง → formal → Update → Shift+↓
+ */
+async function runTranscriptionPipeline(
+    runToken,
+    cycleStartAt,
+    pipelineTaskId,
+    {
+        classificationValue = "valid",
+        skipInitialClassificationClick = false,
+        forceTranscribeFromInvalid = false,
+    } = {}
+) {
+    if (!skipInitialClassificationClick) {
+        await delay(READ_DELAY_MS);
+        if (!isRunActive(runToken)) return;
+
+        const scanned = scanClassificationTarget();
+        if (scanned?.targetEl) {
+            scanned.targetEl.click();
+            console.log("🖱️ 1. กด Classification เรียบร้อย!");
+            if (scanned.classificationValue) {
+                classificationValue = scanned.classificationValue;
+            }
+        } else {
+            console.warn("⚠️ pipeline: ไม่พบ Classification element สำหรับคลิก");
+        }
+
+        await delay(1000);
+        if (!isRunActive(runToken)) return;
+    } else {
+        await delay(500);
+        if (!isRunActive(runToken)) return;
+    }
+
+    if (classificationValue === "invalid") {
+        if (noRecheckInvalidEnabled && !forceTranscribeFromInvalid) {
+            console.log(
+                "⚡ Classification = Invalid — No Recheck: Optimized → Has Errors → เช็ค Task ID → Update"
+            );
+            setStatus("Invalid (No Recheck): Optimized → Has Errors…");
+            await runInvalidToVerifiedFlow(runToken, cycleStartAt, pipelineTaskId);
+            return;
+        }
+        console.log(
+            "⚡ Classification = Invalid → สลับเป็น Valid แล้วรัน pipeline (คัดกรองด้วย API)"
+        );
+        setStatus("Invalid → Valid แล้วถอดเสียง...");
+        await switchClassificationInvalidToValid(runToken);
+        await delay(450);
+        if (!isRunActive(runToken)) return;
+    }
+
+    let ta = await waitForSelector('textarea[name="Annotation Result"]', {
+        timeoutMs: 8000,
+        intervalMs: 250,
+    });
+    if (ta) {
+        ta.focus();
+        console.log("📝 2. โฟกัสกล่อง Annotation Result แล้ว");
+
+        setStatus("ถอดเสียง (Local API)...");
+        const audioBase64 = await fetchAudioAsBase64();
+        if (!audioBase64) {
+            console.warn("⚠️ ไม่มีข้อมูลเสียง — ข้ามการเรียก API");
+            setStatus("ไม่มีไฟล์เสียง");
+            return;
+        }
+
+        const apiResult = await postTranscribe(audioBase64);
+        if (!isRunActive(runToken)) return;
+        if (!apiResult.ok) {
+            console.error("[DingTag]", apiResult.errorLabel, "—", apiResult.detail);
+            setStatus(apiResult.errorLabel + " — " + (apiResult.detail || "").slice(0, 100));
+            return;
+        }
+        const data = apiResult.data;
+
+        if (data.status === "paused") {
+            console.warn("[DingTag] โปรแกรม Python ตั้งค่า PAUSE — ไม่ถอดเสียง (เปิดสวิตช์ AI ในแอป)");
+            setStatus("API: ระบบ AI หยุดชั่วคราว");
+            return;
+        }
+
+        if (data.status === "error") {
+            console.error("[DingTag] ถอดเสียงล้มเหลว:", data.message || JSON.stringify(data));
+            setStatus("ถอดเสียงล้มเหลว: " + String(data.message || "").slice(0, 80));
+            return;
+        }
+
+        const qc = data.qc || {};
+        const longSil = qc.longSilence;
+        if (longSil && longSil.trigger === true) {
+            console.warn(
+                `[DingTag] ช่วงเงียบ/พลังงานต่ำต่อเนื่อง ${longSil.longestRunSec}s (เกณฑ์ ${longSil.thresholdSec}s) → Invalid Data Missing`
+            );
+            setStatus("เงียบ/ไม่มีเสียงพูดต่อเนื่องเกิน 2.5 วิ — ส่ง Data Missing");
+            await runInvalidDataMissingAcceptFlow(
+                "Long silence / low-energy segment (>=2.5s)",
+                runToken,
+                cycleStartAt,
+                pipelineTaskId
+            );
+            return;
+        }
+
+        const audioQ = qc.audioQuality;
+        if (audioQ && audioQ.trigger === true) {
+            console.warn(
+                `[DingTag] AI QC เสียง/ถอดเสียง → ${audioQ.category || "BAD"} (Data Missing)`
+            );
+            setStatus(
+                `คุณภาพเสียง/ถอดเสียงไม่ผ่าน (${audioQ.category || ""}) — ส่ง Data Missing`
+            );
+            await runInvalidDataMissingAcceptFlow(
+                `Audio/transcript QC: ${audioQ.category || "BAD"}`,
+                runToken,
+                cycleStartAt,
+                pipelineTaskId
+            );
+            return;
+        }
+
+        if (data.isSensitive === true) {
+            console.warn("⚠️ เนื้อหาอ่อนไหว (Politics/War/Monarchy) — ข้ามการวางข้อความ และคงค่าเดิมไว้");
+            setStatus("Sensitive — ส่ง invalid flow");
+            await runInvalidDataMissingAcceptFlow("Sensitive content", runToken, cycleStartAt, pipelineTaskId);
+            return;
+        }
+
+        const halu = qc.hallucination || {};
+        if (halu.retried) {
+            const fb = halu.fallbackModel || "fallback";
+            if (halu.retriedHallucinated) {
+                console.warn(
+                    `[DingTag] 🌀 AI หลอนซ้ำ (unit='${halu.unit}'×${halu.reps}) — ลอง ${fb} แล้วยังหลอนอีก (unit='${halu.retriedUnit}'×${halu.retriedReps}) → ใช้ผลลัพธ์เดิม`
+                );
+                setStatus(`AI หลอน (ลอง ${fb} แล้วยังซ้ำ) — ใช้ผลลัพธ์เดิม`);
+            } else {
+                console.log(
+                    `[DingTag] ✅ AI หลอน (unit='${halu.unit}'×${halu.reps}) → ${fb} แก้ได้ (${halu.textLen} → ${halu.retriedTextLen} chars)`
+                );
+                setStatus(`AI หลอน → ${fb} แก้แล้ว`);
+            }
+        } else if (halu.primaryHallucinated) {
+            console.warn(
+                `[DingTag] 🌀 AI หลอน (unit='${halu.unit}'×${halu.reps}) — แต่ primary คือ fallback อยู่แล้ว ข้าม retry`
+            );
+        }
+
+        if (qc.isNonTarget === true) {
+            const warnParts = [
+                "⚠️ QC Non-Target — englishRatio:",
+                qc.englishRatio,
+                "source:",
+                qc.nonTargetSource,
+            ];
+            if (qc.foreignScript) {
+                warnParts.push(
+                    "foreignScript:",
+                    qc.foreignScript,
+                    "count:",
+                    qc.foreignScriptCount,
+                    "share:",
+                    qc.foreignScriptShare
+                );
+            }
+            if (qc.centralThaiRecheck) {
+                warnParts.push(
+                    "recheck:",
+                    qc.centralThaiRecheck.overturned ? "overturned" : "confirmed"
+                );
+            }
+            warnParts.push("— ข้ามการวางข้อความ และคงค่าเดิมไว้");
+            console.warn(...warnParts);
+            const statusSuffix = qc.foreignScript ? ` (${qc.foreignScript})` : "";
+            setStatus(`Non-Target${statusSuffix} — ส่ง invalid flow`);
+            await runInvalidNonTargetLanguageAcceptFlow(
+                qc.foreignScript
+                    ? `Non-target language (foreign script: ${qc.foreignScript})`
+                    : "Non-target language (QC)",
+                runToken,
+                cycleStartAt,
+                pipelineTaskId
+            );
+            return;
+        }
+
+        if ((qc.hallucination || {}).stillHallucinated === true) {
+            const hh = qc.hallucination || {};
+            const u = hh.finalUnit || hh.unit || "";
+            const r = hh.finalReps ?? hh.reps ?? 0;
+            console.warn(
+                `[DingTag] คำซ้ำหลังถอดเสียง (unit='${u}'×${r}) — วางข้อความดิบแล้วส่ง Invalid (Data Missing)`
+            );
+            setStatus("คำซ้ำหลังถอดเสียง — วางข้อความแล้วส่ง Data Missing");
+            safeSetTextarea(runToken, ta, data.text || "", "raw → invalid (repetition)");
+            await runInvalidDataMissingAcceptFlow(
+                "Repetitive transcript / data missing (hallucination)",
+                runToken,
+                cycleStartAt,
+                pipelineTaskId
+            );
+            return;
+        }
+
+        safeSetTextarea(runToken, ta, data.text || "", "raw");
+        setStatus("วางข้อความดิบแล้ว (กำลังจัดคำ)...");
+
+        const formalResult = await postFormalize(data.text || "");
+        if (!isRunActive(runToken)) return;
+        if (!formalResult.ok) {
+            console.warn("[DingTag] formalize failed:", formalResult.errorLabel, formalResult.detail);
+            setStatus("จัดคำไม่สำเร็จ (ใช้ข้อความดิบ)");
+        } else if ((formalResult.data || {}).status === "paused") {
+            setStatus("Formal: ระบบ AI หยุดชั่วคราว");
+        } else {
+            const formatted = (formalResult.data || {}).text || "";
+            const fqc = (formalResult.data || {}).qc || {};
+            const fsp = fqc.formalSpacing;
+            if (fsp && fsp.spacingRefined) {
+                console.log(
+                    "[DingTag] 📐 Formal spacing refined:",
+                    fsp.spacingModel || "",
+                    fsp.reason || ""
+                );
+            }
+            if (formatted && formatted.trim()) {
+                const fHallu = (fqc.hallucination || {}).stillHallucinated === true;
+                if (fHallu) {
+                    const fh = fqc.hallucination || {};
+                    const fu = fh.finalUnit || fh.unit || "";
+                    const fr = fh.finalReps ?? fh.reps ?? 0;
+                    console.warn(
+                        `[DingTag] คำซ้ำหลังจัดคำ (unit='${fu}'×${fr}) — วางข้อความแล้วส่ง Invalid (Data Missing)`
+                    );
+                    setStatus("คำซ้ำหลังจัดคำ — ส่ง Data Missing");
+                    safeSetTextarea(runToken, ta, formatted, "formal → invalid (repetition)");
+                    await runInvalidDataMissingAcceptFlow(
+                        "Repetitive text after formalize / data missing",
+                        runToken,
+                        cycleStartAt,
+                        pipelineTaskId
+                    );
+                    return;
+                }
+                safeSetTextarea(runToken, ta, formatted, "formal");
+                setStatus(
+                    fsp && fsp.spacingRefined
+                        ? "จัดคำแล้ว (แก้เว้นวรรคถี่ด้วย Gemini)"
+                        : "จัดคำแล้ว"
+                );
+            } else {
+                setStatus("จัดคำแล้ว (ผลลัพธ์ว่าง)");
+            }
+        }
+    } else {
+        console.log("⚠️ ไม่พบ Text Area...");
+        setStatus("ไม่พบ Text Area");
+        return;
+    }
+
+    await delay(MOVE_DELAY_MS);
+    if (!isRunActive(runToken)) return;
+
+    await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
+    if (!isRunActive(runToken)) return;
+
+    const refocusMain = refocusClassification();
+    if (refocusMain) {
+        console.log("🖱️ ก่อนส่งงาน: refocus Classification (<em>) แล้ว");
+    } else {
+        console.warn("⚠️ ก่อนส่งงาน: ไม่พบ Classification value element");
+    }
+
+    if (blurAnyActiveElement()) {
+        console.log("👀 Valid flow: blur active element ก่อนเลือก Review radios");
+    }
+    if (dispatchEscape()) {
+        console.log("⎋ Valid flow: ส่ง Escape ก่อนเลือก Review radios");
+    }
+    await delay(300);
+    if (!isRunActive(runToken)) return;
+
+    setStatus("Valid: กด Optimized → Verified ก่อน Update");
+    const optValidRes = await clickOptimizedRadio({ tries: 5, intervalMs: 300, runToken });
+    if (!optValidRes.ok && optValidRes.reason === "stale") return;
+    if (!optValidRes.ok) {
+        console.warn("⚠️ Valid flow: ไม่พบ radio Optimized — ยังลอง Verified แล้ว Update ต่อ");
+    } else {
+        console.log("✅ Valid flow: เลือก Optimized แล้ว — รอก่อนกด Verified");
+    }
+    await delay(800);
+    if (!isRunActive(runToken)) return;
+
+    const verRadioRes = await clickVerifiedRadio({ tries: 5, intervalMs: 300, runToken });
+    if (!verRadioRes.ok && verRadioRes.reason === "stale") return;
+    if (!verRadioRes.ok) {
+        console.warn("⚠️ Valid flow: ไม่พบ radio Verified — ยังลองกด Update");
+    } else {
+        console.log("✅ Valid flow: เลือก Verified (radio) แล้ว");
+    }
+    await delay(300);
+    if (!isRunActive(runToken)) return;
+
+    if (blurAnyActiveElement()) {
+        console.log("👀 Valid flow: blur หลังเลือก radios ก่อนกด Update");
+    }
+    if (dispatchEscape()) {
+        console.log("⎋ Valid flow: ส่ง Escape ก่อนกด Update");
+    }
+    await delay(200);
+    if (!isRunActive(runToken)) return;
+
+    const validTaskChk = verifyExpectedTaskIdBeforeUpdate(pipelineTaskId, "Valid flow");
+    if (!validTaskChk.ok) {
+        setStatus("Valid: Task เปลี่ยนก่อน Update — ข้ามการกด Update");
+        return;
+    }
+
+    console.log("🔍 กำลังเช็คปุ่ม Update (robustClick)...");
+    const updMainRes = await clickUpdateWithEnabledCheck({
+        runToken,
+        maxTries: 3,
+        retryDelayMs: 1000,
+        useNudgeOnRetry: false,
+        skipBlurBeforeCheck: true,
+        pressEscBeforeClick: true,
+        escBeforeClickDelayMs: 200,
+    });
+    if (!updMainRes.ok) {
+        if (updMainRes.reason === "stale") return;
+        console.log("❌ 4. ข้ามการกด Update (ปุ่มยัง disabled หลังลอง 3 ครั้ง) -> Shift+↓");
+        setStatus("ข้าม Update (ปุ่มยัง disabled) → ไป task ถัดไป");
+        await delay(500);
+        if (!isRunActive(runToken)) return;
+        if (await goToNextTask({ runToken })) {
+            setStatus("ส่ง Shift+↓ ไป task ถัดไปแล้ว (ข้าม Update)");
+            await delay(600);
+        }
+        return;
+    }
+    console.log("✅ 4. กดปุ่ม Update สำเร็จ! (robustClick)");
+    markTaskCommittedAfterSuccessfulUpdate(pipelineTaskId);
+    setStatus("Valid: ส่งงานแล้ว — รอให้ระบบบันทึก");
+
+    await delay(1500);
+    if (!isRunActive(runToken)) return;
+
+    console.log("🔍 ตรวจสอบป๊อปอัป Ignore & Submit...");
+    const pop = await clickPopupAndVerify(["Ignore & Submit"], {
+        tries: 8,
+        intervalMs: 500,
+        waitDisappearMs: 2200,
+    });
+    if (pop.ok) {
+        if (pop.reason !== "not_found") console.log("✅ 5. Popup ถูกกดและหายไปแล้ว");
+    } else {
+        console.warn("⚠️ 5. Popup ยังอยู่/ค้าง (ไม่มั่นใจว่ากดติด):", pop.reason);
+        setStatus("Popup ค้าง: Ignore & Submit");
+    }
+
+    const postUpdateDelayMs = 2000;
+    console.log(
+        `⏳ Valid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
+    );
+    setStatus(`Valid: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`);
+    await delay(postUpdateDelayMs);
+    if (!isRunActive(runToken)) return;
+    await closeQualityCheckFailedIfPresent({ runToken });
+    if (!isRunActive(runToken)) return;
+    if (await goToNextTask({ runToken })) {
+        setStatus("ส่ง Shift+↓ ไป task ถัดไปแล้ว");
+        await delay(600);
+    }
+}
+
 setInterval(() => {
     if (extensionMode !== "auto" || !isAutoPilotOn || isProcessing) return;
     if (location.href !== lastSeenUrl) {
@@ -4744,24 +5418,9 @@ setInterval(() => {
     }
 
     try {
-        let targetEl = null;
-        let classificationValue = "";
-        const items = document.querySelectorAll(".lsf-annotation-items__result-item");
-        for (let item of items) {
-            const label = item.querySelector(".lsf-annotation-items__result-label");
-            if (!label) continue;
-            if (!label.textContent || !label.textContent.includes("Classification")) continue;
-
-            const valueEl = item.querySelector(".lsf-annotation-items__result-value");
-            if (!valueEl) continue;
-
-            const valueText = valueEl.textContent ? valueEl.textContent.trim().toLowerCase() : "";
-            if (valueText === "valid" || valueText === "invalid") {
-                targetEl = valueEl.querySelector("em") || valueEl;
-                classificationValue = valueText;
-                break;
-            }
-        }
+        const classified = scanClassificationTarget();
+        const targetEl = classified?.targetEl || null;
+        const classificationValue = classified?.classificationValue || "";
 
         const currentTaskId = getCurrentTaskId();
         if (targetEl) {
@@ -4924,366 +5583,11 @@ setInterval(() => {
                     const cycleStartAt = Date.now();
                     const pipelineTaskId = currentTaskId;
 
-                    await delay(READ_DELAY_MS);
-                    if (!isRunActive(runToken)) return;
-
-                    targetEl.click();
-                    console.log("🖱️ 1. กด Classification เรียบร้อย!");
-
-                    await delay(1000);
-                    if (!isRunActive(runToken)) return;
-
-                    if (classificationValue === "invalid") {
-                        if (noRecheckInvalidEnabled) {
-                            console.log(
-                                "⚡ Classification = Invalid — No Recheck: Optimized → Has Errors → เช็ค Task ID → Update"
-                            );
-                            setStatus("Invalid (No Recheck): Optimized → Has Errors…");
-                            await runInvalidToVerifiedFlow(runToken, cycleStartAt, pipelineTaskId);
-                            return;
-                        }
-                        console.log(
-                            "⚡ Classification = Invalid → สลับเป็น Valid แล้วรัน pipeline (คัดกรองด้วย API)"
-                        );
-                        setStatus("Invalid → Valid แล้วถอดเสียง...");
-                        await switchClassificationInvalidToValid(runToken);
-                        await delay(450);
-                        if (!isRunActive(runToken)) return;
-                    }
-
-                    let ta = await waitForSelector('textarea[name="Annotation Result"]', {
-                        timeoutMs: 8000,
-                        intervalMs: 250,
+                    await runTranscriptionPipeline(runToken, cycleStartAt, pipelineTaskId, {
+                        classificationValue,
+                        skipInitialClassificationClick: false,
+                        forceTranscribeFromInvalid: false,
                     });
-                    if (ta) {
-                        ta.focus();
-                        console.log("📝 2. โฟกัสกล่อง Annotation Result แล้ว");
-
-                        setStatus("ถอดเสียง (Local API)...");
-                        const audioBase64 = await fetchAudioAsBase64();
-                        if (!audioBase64) {
-                            console.warn("⚠️ ไม่มีข้อมูลเสียง — ข้ามการเรียก API");
-                            setStatus("ไม่มีไฟล์เสียง");
-                            return;
-                        }
-
-                        const apiResult = await postTranscribe(audioBase64);
-                        if (!isRunActive(runToken)) return;
-                        if (!apiResult.ok) {
-                            console.error("[DingTag]", apiResult.errorLabel, "—", apiResult.detail);
-                            setStatus(apiResult.errorLabel + " — " + (apiResult.detail || "").slice(0, 100));
-                            return;
-                        }
-                        const data = apiResult.data;
-
-                        if (data.status === "paused") {
-                            console.warn("[DingTag] โปรแกรม Python ตั้งค่า PAUSE — ไม่ถอดเสียง (เปิดสวิตช์ AI ในแอป)");
-                            setStatus("API: ระบบ AI หยุดชั่วคราว");
-                            return;
-                        }
-
-                        if (data.status === "error") {
-                            console.error("[DingTag] ถอดเสียงล้มเหลว:", data.message || JSON.stringify(data));
-                            setStatus("ถอดเสียงล้มเหลว: " + String(data.message || "").slice(0, 80));
-                            return;
-                        }
-
-                        const qc = data.qc || {};
-                        const longSil = qc.longSilence;
-                        if (longSil && longSil.trigger === true) {
-                            console.warn(
-                                `[DingTag] ช่วงเงียบ/พลังงานต่ำต่อเนื่อง ${longSil.longestRunSec}s (เกณฑ์ ${longSil.thresholdSec}s) → Invalid Data Missing`
-                            );
-                            setStatus("เงียบ/ไม่มีเสียงพูดต่อเนื่องเกิน 2.5 วิ — ส่ง Data Missing");
-                            await runInvalidDataMissingAcceptFlow(
-                                "Long silence / low-energy segment (>=2.5s)",
-                                runToken,
-                                cycleStartAt,
-                                pipelineTaskId
-                            );
-                            return;
-                        }
-
-                        const audioQ = qc.audioQuality;
-                        if (audioQ && audioQ.trigger === true) {
-                            console.warn(
-                                `[DingTag] AI QC เสียง/ถอดเสียง → ${audioQ.category || "BAD"} (Data Missing)`
-                            );
-                            setStatus(
-                                `คุณภาพเสียง/ถอดเสียงไม่ผ่าน (${audioQ.category || ""}) — ส่ง Data Missing`
-                            );
-                            await runInvalidDataMissingAcceptFlow(
-                                `Audio/transcript QC: ${audioQ.category || "BAD"}`,
-                                runToken,
-                                cycleStartAt,
-                                pipelineTaskId
-                            );
-                            return;
-                        }
-
-                        if (data.isSensitive === true) {
-                            console.warn("⚠️ เนื้อหาอ่อนไหว (Politics/War/Monarchy) — ข้ามการวางข้อความ และคงค่าเดิมไว้");
-                            setStatus("Sensitive — ส่ง invalid flow");
-                            await runInvalidDataMissingAcceptFlow("Sensitive content", runToken, cycleStartAt, pipelineTaskId);
-                            return;
-                        }
-
-                        // Hallucination guard log — ถ้า Python server ลอง fallback model มา ให้ผู้ใช้เห็นใน log/status
-                        const halu = qc.hallucination || {};
-                        if (halu.retried) {
-                            const fb = halu.fallbackModel || "fallback";
-                            if (halu.retriedHallucinated) {
-                                console.warn(
-                                    `[DingTag] 🌀 AI หลอนซ้ำ (unit='${halu.unit}'×${halu.reps}) — ลอง ${fb} แล้วยังหลอนอีก (unit='${halu.retriedUnit}'×${halu.retriedReps}) → ใช้ผลลัพธ์เดิม`
-                                );
-                                setStatus(`AI หลอน (ลอง ${fb} แล้วยังซ้ำ) — ใช้ผลลัพธ์เดิม`);
-                            } else {
-                                console.log(
-                                    `[DingTag] ✅ AI หลอน (unit='${halu.unit}'×${halu.reps}) → ${fb} แก้ได้ (${halu.textLen} → ${halu.retriedTextLen} chars)`
-                                );
-                                setStatus(`AI หลอน → ${fb} แก้แล้ว`);
-                            }
-                        } else if (halu.primaryHallucinated) {
-                            console.warn(
-                                `[DingTag] 🌀 AI หลอน (unit='${halu.unit}'×${halu.reps}) — แต่ primary คือ fallback อยู่แล้ว ข้าม retry`
-                            );
-                        }
-
-                        if (qc.isNonTarget === true) {
-                            const warnParts = [
-                                "⚠️ QC Non-Target — englishRatio:",
-                                qc.englishRatio,
-                                "source:",
-                                qc.nonTargetSource,
-                            ];
-                            if (qc.foreignScript) {
-                                warnParts.push(
-                                    "foreignScript:",
-                                    qc.foreignScript,
-                                    "count:",
-                                    qc.foreignScriptCount,
-                                    "share:",
-                                    qc.foreignScriptShare
-                                );
-                            }
-                            if (qc.centralThaiRecheck) {
-                                warnParts.push(
-                                    "recheck:",
-                                    qc.centralThaiRecheck.overturned ? "overturned" : "confirmed"
-                                );
-                            }
-                            warnParts.push("— ข้ามการวางข้อความ และคงค่าเดิมไว้");
-                            console.warn(...warnParts);
-                            const statusSuffix = qc.foreignScript
-                                ? ` (${qc.foreignScript})`
-                                : "";
-                            setStatus(`Non-Target${statusSuffix} — ส่ง invalid flow`);
-                            await runInvalidNonTargetLanguageAcceptFlow(
-                                qc.foreignScript
-                                    ? `Non-target language (foreign script: ${qc.foreignScript})`
-                                    : "Non-target language (QC)",
-                                runToken,
-                                cycleStartAt,
-                                pipelineTaskId
-                            );
-                            return;
-                        }
-
-                        // ถอดเสียงแล้วข้อความยังมีคำซ้ำผิดปกติ (เช่น อ้าอ้าอ้า... ยาวๆ) → วางข้อความดิบแล้วส่ง Invalid + Data Missing
-                        if ((qc.hallucination || {}).stillHallucinated === true) {
-                            const hh = qc.hallucination || {};
-                            const u = hh.finalUnit || hh.unit || "";
-                            const r = hh.finalReps ?? hh.reps ?? 0;
-                            console.warn(
-                                `[DingTag] คำซ้ำหลังถอดเสียง (unit='${u}'×${r}) — วางข้อความดิบแล้วส่ง Invalid (Data Missing)`
-                            );
-                            setStatus("คำซ้ำหลังถอดเสียง — วางข้อความแล้วส่ง Data Missing");
-                            safeSetTextarea(runToken, ta, data.text || "", "raw → invalid (repetition)");
-                            await runInvalidDataMissingAcceptFlow(
-                                "Repetitive transcript / data missing (hallucination)",
-                                runToken,
-                                cycleStartAt,
-                                pipelineTaskId
-                            );
-                            return;
-                        }
-
-                        // Step A: วาง raw transcript ก่อน เพื่อให้มั่นใจว่า "ดูดเสียงมาจริง"
-                        safeSetTextarea(runToken, ta, data.text || "", "raw");
-                        setStatus("วางข้อความดิบแล้ว (กำลังจัดคำ)...");
-
-                        // Step B: สั่ง formal จัดคำ แล้ววางทับ
-                        const formalResult = await postFormalize(data.text || "");
-                        if (!isRunActive(runToken)) return;
-                        if (!formalResult.ok) {
-                            console.warn("[DingTag] formalize failed:", formalResult.errorLabel, formalResult.detail);
-                            setStatus("จัดคำไม่สำเร็จ (ใช้ข้อความดิบ)");
-                        } else if ((formalResult.data || {}).status === "paused") {
-                            setStatus("Formal: ระบบ AI หยุดชั่วคราว");
-                        } else {
-                            const formatted = (formalResult.data || {}).text || "";
-                            const fqc = (formalResult.data || {}).qc || {};
-                            const fsp = fqc.formalSpacing;
-                            if (fsp && fsp.spacingRefined) {
-                                console.log(
-                                    "[DingTag] 📐 Formal spacing refined:",
-                                    fsp.spacingModel || "",
-                                    fsp.reason || ""
-                                );
-                            }
-                            if (formatted && formatted.trim()) {
-                                const fHallu = (fqc.hallucination || {}).stillHallucinated === true;
-                                if (fHallu) {
-                                    const fh = fqc.hallucination || {};
-                                    const fu = fh.finalUnit || fh.unit || "";
-                                    const fr = fh.finalReps ?? fh.reps ?? 0;
-                                    console.warn(
-                                        `[DingTag] คำซ้ำหลังจัดคำ (unit='${fu}'×${fr}) — วางข้อความแล้วส่ง Invalid (Data Missing)`
-                                    );
-                                    setStatus("คำซ้ำหลังจัดคำ — ส่ง Data Missing");
-                                    safeSetTextarea(runToken, ta, formatted, "formal → invalid (repetition)");
-                                    await runInvalidDataMissingAcceptFlow(
-                                        "Repetitive text after formalize / data missing",
-                                        runToken,
-                                        cycleStartAt,
-                                        pipelineTaskId
-                                    );
-                                    return;
-                                }
-                                safeSetTextarea(runToken, ta, formatted, "formal");
-                                setStatus(
-                                    fsp && fsp.spacingRefined
-                                        ? "จัดคำแล้ว (แก้เว้นวรรคถี่ด้วย Gemini)"
-                                        : "จัดคำแล้ว"
-                                );
-                            } else {
-                                setStatus("จัดคำแล้ว (ผลลัพธ์ว่าง)");
-                            }
-                        }
-                    } else {
-                        console.log("⚠️ ไม่พบ Text Area...");
-                        setStatus("ไม่พบ Text Area");
-                        return;
-                    }
-
-                    await delay(MOVE_DELAY_MS);
-                    if (!isRunActive(runToken)) return;
-
-                    await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
-                    if (!isRunActive(runToken)) return;
-
-                    const refocusMain = refocusClassification();
-                    if (refocusMain) {
-                        console.log("🖱️ ก่อนส่งงาน: refocus Classification (<em>) แล้ว");
-                    } else {
-                        console.warn("⚠️ ก่อนส่งงาน: ไม่พบ Classification value element");
-                    }
-
-                    // Valid flow: ก่อนกด Update → blur + Esc แล้วเลือก Optimized → Verified (Ant radio) ค่อยกด Update
-                    if (blurAnyActiveElement()) {
-                        console.log("👀 Valid flow: blur active element ก่อนเลือก Review radios");
-                    }
-                    if (dispatchEscape()) {
-                        console.log("⎋ Valid flow: ส่ง Escape ก่อนเลือก Review radios");
-                    }
-                    await delay(300);
-                    if (!isRunActive(runToken)) return;
-
-                    setStatus("Valid: กด Optimized → Verified ก่อน Update");
-                    const optValidRes = await clickOptimizedRadio({ tries: 5, intervalMs: 300, runToken });
-                    if (!optValidRes.ok && optValidRes.reason === "stale") return;
-                    if (!optValidRes.ok) {
-                        console.warn("⚠️ Valid flow: ไม่พบ radio Optimized — ยังลอง Verified แล้ว Update ต่อ");
-                    } else {
-                        console.log("✅ Valid flow: เลือก Optimized แล้ว — รอก่อนกด Verified");
-                    }
-                    await delay(800);
-                    if (!isRunActive(runToken)) return;
-
-                    const verRadioRes = await clickVerifiedRadio({ tries: 5, intervalMs: 300, runToken });
-                    if (!verRadioRes.ok && verRadioRes.reason === "stale") return;
-                    if (!verRadioRes.ok) {
-                        console.warn("⚠️ Valid flow: ไม่พบ radio Verified — ยังลองกด Update");
-                    } else {
-                        console.log("✅ Valid flow: เลือก Verified (radio) แล้ว");
-                    }
-                    await delay(300);
-                    if (!isRunActive(runToken)) return;
-
-                    if (blurAnyActiveElement()) {
-                        console.log("👀 Valid flow: blur หลังเลือก radios ก่อนกด Update");
-                    }
-                    if (dispatchEscape()) {
-                        console.log("⎋ Valid flow: ส่ง Escape ก่อนกด Update");
-                    }
-                    await delay(200);
-                    if (!isRunActive(runToken)) return;
-
-                    const validTaskChk = verifyExpectedTaskIdBeforeUpdate(pipelineTaskId, "Valid flow");
-                    if (!validTaskChk.ok) {
-                        setStatus("Valid: Task เปลี่ยนก่อน Update — ข้ามการกด Update");
-                        return;
-                    }
-
-                    console.log("🔍 กำลังเช็คปุ่ม Update (robustClick)...");
-                    const updMainRes = await clickUpdateWithEnabledCheck({
-                        runToken,
-                        maxTries: 3,
-                        retryDelayMs: 1000,
-                        useNudgeOnRetry: false,
-                        skipBlurBeforeCheck: true,
-                        pressEscBeforeClick: true,
-                        escBeforeClickDelayMs: 200,
-                    });
-                    if (!updMainRes.ok) {
-                        if (updMainRes.reason === "stale") return;
-                        console.log("❌ 4. ข้ามการกด Update (ปุ่มยัง disabled หลังลอง 3 ครั้ง) -> Shift+↓");
-                        setStatus("ข้าม Update (ปุ่มยัง disabled) → ไป task ถัดไป");
-                        await delay(500);
-                        if (!isRunActive(runToken)) return;
-                        if (await goToNextTask({ runToken })) {
-                            setStatus("ส่ง Shift+↓ ไป task ถัดไปแล้ว (ข้าม Update)");
-                            await delay(600);
-                        }
-                        return;
-                    }
-                    console.log("✅ 4. กดปุ่ม Update สำเร็จ! (robustClick)");
-                    markTaskCommittedAfterSuccessfulUpdate(pipelineTaskId);
-                    setStatus("Valid: ส่งงานแล้ว — รอให้ระบบบันทึก");
-
-                    await delay(1500);
-                    if (!isRunActive(runToken)) return;
-
-                    console.log("🔍 ตรวจสอบป๊อปอัป Ignore & Submit...");
-                    const pop = await clickPopupAndVerify(["Ignore & Submit"], {
-                        tries: 8,
-                        intervalMs: 500,
-                        waitDisappearMs: 2200,
-                    });
-                    if (pop.ok) {
-                        if (pop.reason !== "not_found") console.log("✅ 5. Popup ถูกกดและหายไปแล้ว");
-                    } else {
-                        console.warn("⚠️ 5. Popup ยังอยู่/ค้าง (ไม่มั่นใจว่ากดติด):", pop.reason);
-                        setStatus("Popup ค้าง: Ignore & Submit");
-                    }
-
-                    // หน่วงเพิ่มก่อนส่ง Shift+↓ ตามคำสั่งผู้ใช้ — "หลังจากกด Update ดีเล 2 วิ"
-                    const postUpdateDelayMs = 2000;
-                    console.log(
-                        `⏳ Valid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
-                    );
-                    setStatus(
-                        `Valid: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`
-                    );
-                    await delay(postUpdateDelayMs);
-                    if (!isRunActive(runToken)) return;
-                    // เช็ค + ปิด Quality Check Failed popup (ถ้ามี) ก่อนเลื่อนไป task ถัดไป
-                    await closeQualityCheckFailedIfPresent({ runToken });
-                    if (!isRunActive(runToken)) return;
-                    if (await goToNextTask({ runToken })) {
-                        setStatus("ส่ง Shift+↓ ไป task ถัดไปแล้ว");
-                        await delay(600);
-                    }
                 } catch (e) {
                     console.error("Sequence Error:", e);
                     setStatus("เกิด error (ดู Console)");
@@ -5310,35 +5614,31 @@ setInterval(() => {
                     noClassificationTaskId = currentTaskId;
                     noClassificationStartedAt = now;
                     console.log(
-                        `⏳ task ใหม่ (${currentTaskId}) ยังไม่เจอ Classification — รอสูงสุด ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ ก่อน Shift+↓`
+                        `⏳ task ใหม่ (${currentTaskId}) ยังไม่เจอ Classification — รอสูงสุด ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ ก่อน waveform recovery`
                     );
                     setStatus(`task ${currentTaskId}: รอ Classification... · ${getNoTargetFilterStatusHint()}`);
                 } else {
                     const waited = now - noClassificationStartedAt;
                     if (waited >= noClassificationTimeoutMs) {
-                        // หมดเวลารอ → Shift+↓ ข้าม
                         console.log(
-                            `⏭️ task ${currentTaskId}: ไม่มี Classification เกิน ${noClassificationTimeoutMs}ms → Shift+↓ ข้าม`
+                            `🔧 task ${currentTaskId}: ไม่มี Classification เกิน ${noClassificationTimeoutMs}ms → waveform recovery`
                         );
-                        setStatus(`task ${currentTaskId}: ไม่มี Classification → Shift+↓`);
-                        const skipTaskId = currentTaskId;
-                        lastProcessedTaskId = skipTaskId;
+                        setStatus(`task ${currentTaskId}: waveform recovery...`);
                         noClassificationTaskId = "";
                         noClassificationStartedAt = 0;
                         isProcessing = true;
                         (async () => {
                             try {
-                                const sent = await goToNextTask({ runToken: null });
-                                if (sent) {
-                                    console.log(`⏭️ auto-skip: ส่ง Shift+↓ จาก task ${skipTaskId} แล้ว`);
-                                } else {
-                                    console.warn(`⚠️ auto-skip: ส่ง Shift+↓ ไม่สำเร็จ (task ${skipTaskId})`);
-                                }
-                                await delay(800);
+                                await runNoClassificationRecoveryFlow(currentTaskId);
                             } catch (e) {
-                                console.warn("[DingTag] auto-skip error:", e?.name, e?.message);
+                                console.warn("[DingTag] waveform recovery error:", e?.name, e?.message);
                             } finally {
+                                await delay(1500);
                                 isProcessing = false;
+                                activeRunToken = 0;
+                                activeTimeouts = [];
+                                console.log("🔄 จบ waveform recovery — รอ task ใหม่...");
+                                if (isAutoPilotOn) setStatus("กำลังรอ task ใหม่...");
                             }
                         })();
                         return;
@@ -5347,7 +5647,7 @@ setInterval(() => {
                         lastNoTargetLogAt = now;
                         const remaining = Math.max(0, (noClassificationTimeoutMs - waited) / 1000);
                         console.log(
-                            `⏳ รอ Classification ใน task ${currentTaskId} อีก ~${remaining.toFixed(1)} วิ ก่อน Shift+↓`
+                            `⏳ รอ Classification ใน task ${currentTaskId} อีก ~${remaining.toFixed(1)} วิ ก่อน waveform recovery`
                         );
                         setStatus(
                             `task ${currentTaskId}: รอ Classification (${remaining.toFixed(1)} วิ) · ${getNoTargetFilterStatusHint()}`
@@ -5373,13 +5673,6 @@ setInterval(() => {
                 }
 
                 // ─────── Auto-Filter recovery: ถ้า bot ไม่เจอ target นาน → apply filter อัตโนมัติ ───────
-                // เงื่อนไข:
-                //   - bot ON อยู่ (อยู่ใน polling loop แล้ว = isAutoPilotOn = true)
-                //   - autoFilterEnabled toggle ON
-                //   - เจอปุ่ม Filters บนหน้านี้
-                //   - filter ไม่ได้กำลังทำงาน
-                //   - "ไม่เจอ target" ติดต่อกัน ≥ NO_TARGET_AUTO_FILTER_AFTER_MS
-                //   - cooldown ผ่านแล้ว (กัน loop)
                 if (autoFilterEnabled && !filterApplyInFlight && isFilterButtonPresent()) {
                     if (noTargetIdleSince === 0) {
                         noTargetIdleSince = now;
@@ -5397,24 +5690,18 @@ setInterval(() => {
                             try {
                                 await runAutoFilterRecovery();
                             } catch (e) {
-                                console.warn(
-                                    "[DingTag] Auto-Filter recovery error:",
-                                    e?.name,
-                                    e?.message
-                                );
+                                console.warn("[DingTag] auto-filter recovery error:", e?.name, e?.message);
                             } finally {
-                                await delay(1500);
                                 isProcessing = false;
                             }
                         })();
                     }
-                } else if (noTargetIdleSince !== 0) {
-                    // เงื่อนไขใดเงื่อนไขหนึ่งหายไป → รีเซ็ตตัวจับเวลา
+                } else {
                     noTargetIdleSince = 0;
                 }
             }
         }
     } catch (e) {
-        isProcessing = false;
+        console.warn("[DingTag] polling error:", e?.name, e?.message);
     }
-}, 1000);
+}, 500);
