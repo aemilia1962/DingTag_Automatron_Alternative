@@ -36,6 +36,11 @@ let lastSeenUrl = location.href;
 // ติดตาม task ใหม่ที่ยังไม่เจอ Classification — ใช้คำนวณว่าควร auto-skip เมื่อใด
 let noClassificationTaskId = "";
 let noClassificationStartedAt = 0;
+/** หลัง user/bot กด Cancel skip — เปิดช่วงเวลาให้ autopilot จัดการ annotation ที่โหลดช้า */
+let wasSkippedControlsVisible = false;
+let postCancelSkipUntil = 0;
+let postCancelSkipKickTaskId = "";
+let postCancelSkipKickInFlight = false;
 // ตรวจจับเมื่อ task เด้งกลับบนสุด (bounce detection)
 let lastNavigatedTaskId = "";
 let bounceSkipInProgress = false;
@@ -2139,22 +2144,17 @@ function hasAdequateExistingWaveformRegion() {
     return { ok: false, reason: "no_region" };
 }
 
+/** สำหรับ workflow: ยังไม่มี Valid/Invalid (และไม่มี region พอ) — ไม่สนใจแถว result อื่นใน sidebar */
 function isAnnotationPanelEmpty() {
     if (scanClassificationTarget()) return false;
     if (hasAdequateExistingWaveformRegion().ok) return false;
+    return true;
+}
 
-    const roots = document.querySelectorAll(
-        ".lsf-annotation-items, .lsf-details__annotations, .lsf-details, .lsf-sidebar"
-    );
-    for (const root of roots) {
-        const t = (root.textContent || "").replace(/\s+/g, " ").trim();
-        if (/no annotation items/i.test(t)) return true;
-    }
-    if (!findClassificationResultRow()) {
-        const anyResult = document.querySelector(".lsf-annotation-items__result-item");
-        if (!anyResult) return true;
-    }
-    return false;
+function markPostCancelSkipWindow(reason) {
+    postCancelSkipUntil = Date.now() + 15000;
+    postCancelSkipKickTaskId = "";
+    console.log("[DingTag] post-cancel skip window:", reason);
 }
 
 /**
@@ -2247,12 +2247,11 @@ function scanClassificationTarget() {
     return null;
 }
 
-/** ต้องลาก waveform + Valid ก่อน — UI ว่าง / ยังไม่มี Valid-Invalid / ยังไม่มี region */
+/** ต้องลาก waveform + Valid ก่อน — ยังไม่มี Valid/Invalid ใน sidebar และไม่มี region พอ */
 function classificationNeedsWaveformRecovery(state) {
     if (state.kind === "valid" || state.kind === "invalid") return false;
     if (hasAdequateExistingWaveformRegion().ok) return false;
-    if (state.kind === "missing" || state.kind === "no_region") return true;
-    return isAnnotationPanelEmpty();
+    return true;
 }
 
 /** UI ว่าง (No region ตามภาพ user) → recovery ทันที ไม่รอ toggle */
@@ -3103,6 +3102,80 @@ function clickClassificationFocus() {
     return refocusClassification();
 }
 
+/**
+ * หลัง Cancel skip (มักกดเอง) — รอ DOM แล้วเข้า pipeline/recovery (ไม่ค้าง status รอ target)
+ */
+async function kickPostCancelSkipHandling(seedTaskId = "") {
+    if (postCancelSkipKickInFlight || isProcessing) return;
+    postCancelSkipKickInFlight = true;
+
+    try {
+        let taskId = String(seedTaskId || "").trim();
+        for (let i = 0; i < 30 && !taskId; i++) {
+            await delay(200);
+            taskId = getCurrentTaskId();
+        }
+        if (!taskId) {
+            setStatus("หลัง Cancel skip — รอ Task ID...");
+            console.warn("[DingTag] post-cancel: อ่าน Task ID ไม่ได้");
+            return;
+        }
+        if (processedTaskIds.has(taskId)) return;
+        if (postCancelSkipKickTaskId === taskId) return;
+        postCancelSkipKickTaskId = taskId;
+
+        setStatus(`หลัง Cancel skip: รอ annotation (task ${taskId})...`);
+        const ready = await waitForPostCancelSkipReady(null, 6500);
+        if (ready.reason === "stale") return;
+
+        isProcessing = true;
+        const runToken = ++runTokenCounter;
+        activeRunToken = runToken;
+        const cycleStartAt = Date.now();
+
+        if (ready.mode === "classified") {
+            console.log(
+                `[DingTag] post-cancel: เข้า pipeline (${ready.classificationValue}) task ${taskId}`
+            );
+            setStatus(`พบ ${ready.classificationValue} — เริ่ม pipeline`);
+            await runTranscriptionPipeline(runToken, cycleStartAt, taskId, {
+                classificationValue: ready.classificationValue,
+                skipInitialClassificationClick: false,
+                forceTranscribeFromInvalid: ready.classificationValue === "invalid",
+            });
+            return;
+        }
+
+        if (ready.mode === "has_region") {
+            const scanned = await waitForClassificationTarget(10000);
+            if (scanned) {
+                console.log(
+                    `[DingTag] post-cancel: region + ${scanned.classificationValue} → pipeline`
+                );
+                await runTranscriptionPipeline(runToken, cycleStartAt, taskId, {
+                    classificationValue: scanned.classificationValue,
+                    skipInitialClassificationClick: false,
+                    forceTranscribeFromInvalid: scanned.classificationValue === "invalid",
+                });
+                return;
+            }
+        }
+
+        console.log(`[DingTag] post-cancel: waveform recovery task ${taskId}`);
+        setStatus(`task ${taskId}: waveform recovery (หลัง Cancel skip)...`);
+        await runNoClassificationRecoveryFlow(taskId);
+    } catch (e) {
+        console.warn("[DingTag] post-cancel kick error:", e?.name, e?.message);
+        setStatus("post-cancel error (ดู Console)");
+    } finally {
+        postCancelSkipKickInFlight = false;
+        isProcessing = false;
+        activeRunToken = 0;
+        activeTimeouts = [];
+        if (isAutoPilotOn) setStatus("กำลังรอ task ใหม่...");
+    }
+}
+
 /** เริ่ม waveform recovery จาก autopilot (กันเรียกซ้อนเมื่อ isProcessing) */
 function scheduleNoClassificationRecoveryFromAutopilot(currentTaskId, classState, triggerLabel) {
     if (!currentTaskId || isProcessing) return false;
@@ -3915,6 +3988,7 @@ async function ensureCancelSkipIfWasSkipped({ runToken } = {}) {
         console.warn("[DingTag] Cancel skip ไม่สำเร็จ:", rcRes.reason);
         return { ok: false, reason: rcRes.reason || "click_failed" };
     }
+    markPostCancelSkipWindow("bot_cancel_skip");
     await delay(400);
     if (runToken != null && !isRunActive(runToken)) {
         return { ok: false, reason: "stale" };
@@ -6413,7 +6487,23 @@ setInterval(() => {
         const targetEl = classified?.targetEl || null;
         const classificationValue = classified?.classificationValue || "";
 
+        const skippedUi = isTaskWasSkipped() || !!findCancelSkipButton();
+        if (wasSkippedControlsVisible && !skippedUi) {
+            markPostCancelSkipWindow("ui_cancel_skip");
+        }
+        wasSkippedControlsVisible = skippedUi;
+
         const currentTaskId = getCurrentTaskId();
+
+        if (
+            postCancelSkipUntil > Date.now() &&
+            !targetEl &&
+            !postCancelSkipKickInFlight
+        ) {
+            kickPostCancelSkipHandling(currentTaskId);
+            return;
+        }
+
         if (targetEl) {
             // เจอ Classification แล้ว — รีเซ็ตตัวจับเวลา auto-skip
             if (noClassificationTaskId) {
@@ -6654,12 +6744,23 @@ setInterval(() => {
                 if (now - lastNoTargetLogAt > 5000) {
                     lastNoTargetLogAt = now;
                     const waitLabel = getClassificationWaitStatusLabel(classState);
-                    const extra = "";
-                    console.log(
-                        `⏳ ยังไม่พร้อม pipeline (${waitLabel})${extra} |`,
-                        getNoTargetFilterStatusHint()
-                    );
-                    setStatus(`${waitLabel} · ${getNoTargetFilterStatusHint()}${extra}`);
+                    if (postCancelSkipUntil > Date.now()) {
+                        setStatus(
+                            `หลัง Cancel skip — กำลังเตรียม workflow (task ${currentTaskId || "?"})...`
+                        );
+                        console.log("[DingTag] post-cancel: รอ kick/recovery", waitLabel);
+                    } else if (!currentTaskId) {
+                        setStatus("รอ Task ID บนหน้า Labeling...");
+                        console.log("⏳ ยังอ่าน Task ID ไม่ได้ — ต้องอยู่หน้า task ที่มี .lsf-current-task__task-id");
+                    } else if (processedTaskIds.has(currentTaskId)) {
+                        setStatus(`task ${currentTaskId} ส่ง Update แล้ว — รอ task ใหม่`);
+                    } else {
+                        console.log(
+                            `⏳ ยังไม่พร้อม pipeline (${waitLabel}) |`,
+                            getNoTargetFilterStatusHint()
+                        );
+                        setStatus(`${waitLabel} · ${getNoTargetFilterStatusHint()}`);
+                    }
                 }
 
                 // ─────── Auto-Filter recovery: ถ้า bot ไม่เจอ target นาน → apply filter อัตโนมัติ ───────

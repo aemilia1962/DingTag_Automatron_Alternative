@@ -15,6 +15,15 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — แก้ค้างหลัง Cancel skip (manual) + status รอ target
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** `kickPostCancelSkipHandling` เมื่อ UI Cancel skip หาย; แก้ `isAnnotationPanelEmpty`; ext 1.8.4
+- **Files:** `content.js`, `manifest.json`, `learnings.md`
+- **Tags:** cancel_skip, stuck, autopilot
+
 ## 2026-05-21 — Cancel skip: ไม่ลากทับเมื่อมี Invalid + region แล้ว
 
 - **Status:** done

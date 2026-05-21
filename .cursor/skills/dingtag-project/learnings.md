@@ -20,6 +20,14 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — หลัง Cancel skip ค้าง status รอ target ยาว
+
+- **Symptom:** กด Cancel skip เอง → สถานะ `ไม่มี region / ยังไม่มี Valid-Invalid · ไม่มีปุ่ม Filters` ค้างนาน
+- **Root cause:** autopilot ไม่จับ Cancel skip ที่ user กด · `isAnnotationPanelEmpty` คืน false เมื่อมี result อื่นใน sidebar · ไม่เข้า recovery
+- **Fix:** ตรวจ UI Was skipped หาย → `markPostCancelSkipWindow` + `kickPostCancelSkipHandling` รอ DOM 6.5s; ว่าง = ไม่มี Valid/Invalid เท่านั้น (ext 1.8.4)
+- **Verify:** ยังไม่ทด
+- **Tags:** cancel_skip, stuck, autopilot
+
 ## 2026-05-21 — Cancel skip แล้วลาก region ทับ (Invalid มี region แล้ว)
 
 - **Symptom:** Was skipped → Cancel skip งาน Invalid ที่ลาก region ไว้แล้ว — bot ลากทับ + recovery กด Valid
