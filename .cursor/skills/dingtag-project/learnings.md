@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — "No region" = UI ว่าง ไม่ใช่ combo
+
+- **Symptom:** หลัง Cancel skip ไม่มี Valid/Invalid / No annotation items (ไม่ใช่ข้อความ combo) — ค้างรอ target
+- **Root cause:** ทีมเรียก "No region" แต่โค้ดเดิมหาแค่ข้อความ `no region` ใน value; สถานะจริงคือ `missing` + panel ว่าง
+- **Fix:** `isAnnotationPanelEmpty()` · `shouldRunWaveformRecoveryImmediately` สำหรับ missing/ว่าง · Cancel skip → `cancel_skip_empty_annotation` → recovery ทันที (ext 1.8.2)
+- **Verify:** ยังไม่ทด — เปรียบรูปว่าง vs รูปมี Valid+region เขียว
+- **Reuse:** ข้อความ `No annotation items`; ไม่มี `.lsf-annotation-items__result-item` Classification
+- **Tags:** no_region, cancel_skip, empty-ui
+
 ## 2026-05-21 — Was skipped ไม่มีปุ่ม Update → Cancel skip ก่อน
 
 - **Symptom:** งาน skip มาแล้ว รัน pipeline จบแต่ไม่มี Update — bot กด Shift+↓ งานไม่ถูกส่งจริง

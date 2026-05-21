@@ -15,6 +15,24 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — No region = UI ว่าง (ไม่มี Valid/Invalid)
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** แก้ความเข้าใจ No region ตาม screenshot; `isAnnotationPanelEmpty` + recovery ทันทีเมื่อว่าง; ext 1.8.2
+- **Files:** `content.js`, `manifest.json`, `flows.md`, `learnings.md`
+- **Tags:** no_region, empty-ui, cancel_skip
+
+## 2026-05-21 — แก้ค้าง Classification No region หลัง Cancel skip
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** ตรวจ `no_region` ใน sidebar; recovery ทันทีแม้ Waveform recovery ปิด; ext 1.8.1
+- **Files:** `content.js`, `manifest.json`, `flows.md`, `reference.md`, `learnings.md`
+- **Tags:** no_region, cancel_skip, stuck
+
 ## 2026-05-21 — Was skipped → กด Cancel skip ก่อน pipeline/Update
 
 - **Status:** done

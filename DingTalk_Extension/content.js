@@ -2111,24 +2111,107 @@ function fireFullMouseClick(el) {
     }
 }
 
-/** อ่าน Classification Valid/Invalid จาก sidebar (ใช้ร่วม polling + recovery) */
-function scanClassificationTarget() {
-    let targetEl = null;
-    let classificationValue = "";
+/**
+ * UI ว่างหลัง Cancel skip (ตามที่ user เรียก "No region"):
+ * - ไม่มี Valid/Invalid ใน Annotation Item
+ * - มักขึ้น "No annotation items" ทางขวา
+ * - waveform ยังไม่มีช่วงสีเขียว
+ */
+function isAnnotationPanelEmpty() {
+    const roots = document.querySelectorAll(
+        ".lsf-annotation-items, .lsf-details__annotations, .lsf-details, .lsf-sidebar"
+    );
+    for (const root of roots) {
+        const t = (root.textContent || "").replace(/\s+/g, " ").trim();
+        if (/no annotation items/i.test(t)) return true;
+    }
+    if (!findClassificationResultRow() && !scanClassificationTarget()) {
+        const anyResult = document.querySelector(".lsf-annotation-items__result-item");
+        if (!anyResult) return true;
+    }
+    return false;
+}
+
+/**
+ * อ่านสถานะ Classification จาก sidebar / Annotation Item
+ * kind: valid | invalid | missing (ไม่มีแถว Classification) | other | no_region (ข้อความ combo เฉพาะกิจ)
+ */
+function getClassificationSidebarState() {
     const items = document.querySelectorAll(".lsf-annotation-items__result-item");
     for (const item of items) {
         const label = item.querySelector(".lsf-annotation-items__result-label");
         if (!label?.textContent?.includes("Classification")) continue;
         const valueEl = item.querySelector(".lsf-annotation-items__result-value");
-        if (!valueEl) continue;
-        const valueText = (valueEl.textContent || "").trim().toLowerCase();
-        if (valueText === "valid" || valueText === "invalid") {
-            targetEl = valueEl.querySelector("em") || valueEl;
-            classificationValue = valueText;
-            break;
+        if (!valueEl) {
+            return { kind: "missing", valueText: "", targetEl: null, row: item };
         }
+        const valueText = (valueEl.textContent || "").trim();
+        const norm = valueText.toLowerCase().replace(/\s+/g, " ");
+        if (norm === "valid") {
+            return {
+                kind: "valid",
+                valueText,
+                targetEl: valueEl.querySelector("em") || valueEl,
+                row: item,
+            };
+        }
+        if (norm === "invalid") {
+            return {
+                kind: "invalid",
+                valueText,
+                targetEl: valueEl.querySelector("em") || valueEl,
+                row: item,
+            };
+        }
+        if (norm.includes("no region") || norm === "no_region" || norm === "noregon") {
+            return { kind: "no_region", valueText, targetEl: valueEl, row: item };
+        }
+        return { kind: "other", valueText, targetEl: valueEl, row: item };
     }
-    return targetEl ? { targetEl, classificationValue } : null;
+    return { kind: "missing", valueText: "", targetEl: null, row: null };
+}
+
+/** อ่าน Classification Valid/Invalid จาก sidebar (ใช้ร่วม polling + recovery) */
+function scanClassificationTarget() {
+    const s = getClassificationSidebarState();
+    if (s.kind === "valid" || s.kind === "invalid") {
+        return { targetEl: s.targetEl, classificationValue: s.kind };
+    }
+    return null;
+}
+
+/** ต้องลาก waveform + Valid ก่อน — UI ว่าง / ยังไม่มี Valid-Invalid */
+function classificationNeedsWaveformRecovery(state) {
+    if (state.kind === "valid" || state.kind === "invalid") return false;
+    if (state.kind === "missing" || state.kind === "no_region") return true;
+    return isAnnotationPanelEmpty();
+}
+
+/** UI ว่าง (No region ตามภาพ user) → recovery ทันที ไม่รอ toggle */
+function shouldRunWaveformRecovery(state) {
+    return classificationNeedsWaveformRecovery(state);
+}
+
+function shouldRunWaveformRecoveryImmediately(state) {
+    if (state.kind === "missing" || state.kind === "no_region") return true;
+    return isAnnotationPanelEmpty() && !scanClassificationTarget();
+}
+
+function getWaveformRecoveryDelayMs(state) {
+    if (shouldRunWaveformRecoveryImmediately(state)) return 600;
+    return noClassificationTimeoutMs;
+}
+
+function getClassificationWaitStatusLabel(state) {
+    if (state.kind === "no_region") return 'combo "No region"';
+    if (state.kind === "missing" || isAnnotationPanelEmpty()) {
+        return "ไม่มี region / ยังไม่มี Valid-Invalid";
+    }
+    if (state.kind === "other") {
+        const v = (state.valueText || "").slice(0, 40);
+        return v ? `Classification = "${v}"` : "Classification ไม่ใช่ Valid/Invalid";
+    }
+    return "ยังไม่มี Classification Valid/Invalid";
 }
 
 function findWaveformCanvas() {
@@ -2951,6 +3034,35 @@ function clickClassificationFocus() {
     return refocusClassification();
 }
 
+/** เริ่ม waveform recovery จาก autopilot (กันเรียกซ้อนเมื่อ isProcessing) */
+function scheduleNoClassificationRecoveryFromAutopilot(currentTaskId, classState, triggerLabel) {
+    if (!currentTaskId || isProcessing) return false;
+    if (processedTaskIds.has(currentTaskId)) return false;
+    if (!shouldRunWaveformRecovery(classState)) return false;
+
+    noClassificationTaskId = "";
+    noClassificationStartedAt = 0;
+    isProcessing = true;
+    console.log(`🔧 task ${currentTaskId}: ${triggerLabel} → waveform recovery`);
+    setStatus(`task ${currentTaskId}: waveform recovery (${triggerLabel})...`);
+
+    (async () => {
+        try {
+            await runNoClassificationRecoveryFlow(currentTaskId);
+        } catch (e) {
+            console.warn("[DingTag] waveform recovery error:", e?.name, e?.message);
+        } finally {
+            await delay(1500);
+            isProcessing = false;
+            activeRunToken = 0;
+            activeTimeouts = [];
+            console.log("🔄 จบ waveform recovery — รอ task ใหม่...");
+            if (isAutoPilotOn) setStatus("กำลังรอ task ใหม่...");
+        }
+    })();
+    return true;
+}
+
 async function fallbackSkipNoClassification(taskId) {
     lastProcessedTaskId = taskId;
     const sent = await goToNextTask({ runToken: null });
@@ -3691,12 +3803,19 @@ async function ensureCancelSkipIfWasSkipped({ runToken } = {}) {
         return { ok: false, reason: "stale" };
     }
     const upd = findSubmitUpdateButton();
+    const classState = getClassificationSidebarState();
+    if (!scanClassificationTarget()) {
+        console.log(
+            "[DingTag] Cancel skip แล้ว — UI ว่าง (ไม่มี Valid/Invalid / No annotation items) → waveform recovery"
+        );
+        return { ok: true, reason: "cancel_skip_empty_annotation", classState };
+    }
     console.log(
         upd
             ? "✅ Cancel skip แล้ว — เจอปุ่ม Update"
             : "✅ Cancel skip แล้ว — ยังไม่เจอ Update (อาจต้องทำ annotation ก่อน)"
     );
-    return { ok: true, reason: "cancel_skip_clicked" };
+    return { ok: true, reason: "cancel_skip_clicked", classState };
 }
 
 function findSubmitUpdateButton() {
@@ -5755,6 +5874,20 @@ async function runTranscriptionPipeline(
     if (!csRes.ok && csRes.reason !== "not_skipped") {
         console.warn("[DingTag] pipeline: Cancel skip ไม่สำเร็จ —", csRes.reason);
     }
+    if (
+        csRes.reason === "cancel_skip_empty_annotation" ||
+        csRes.reason === "cancel_skip_no_region"
+    ) {
+        setStatus("Cancel skip → ไม่มี region — waveform recovery...");
+        await runNoClassificationRecoveryFlow(pipelineTaskId);
+        return;
+    }
+    const postCancelState = getClassificationSidebarState();
+    if (shouldRunWaveformRecovery(postCancelState)) {
+        setStatus("Cancel skip → ยังไม่มี Valid-Invalid — waveform recovery...");
+        await runNoClassificationRecoveryFlow(pipelineTaskId);
+        return;
+    }
 
     if (!skipInitialClassificationClick) {
         await delay(READ_DELAY_MS);
@@ -6130,6 +6263,7 @@ setInterval(() => {
     }
 
     try {
+        const classState = getClassificationSidebarState();
         const classified = scanClassificationTarget();
         const targetEl = classified?.targetEl || null;
         const classificationValue = classified?.classificationValue || "";
@@ -6317,71 +6451,70 @@ setInterval(() => {
             const currentTaskId = getCurrentTaskId();
 
             if (
-                autoSkipNoClassificationEnabled &&
                 currentTaskId &&
-                currentTaskId !== lastProcessedTaskId
+                !processedTaskIds.has(currentTaskId) &&
+                shouldRunWaveformRecovery(classState)
             ) {
+                const recoveryDelayMs = getWaveformRecoveryDelayMs(classState);
+                const waitLabel = getClassificationWaitStatusLabel(classState);
+
+                if (shouldRunWaveformRecoveryImmediately(classState)) {
+                    if (
+                        scheduleNoClassificationRecoveryFromAutopilot(
+                            currentTaskId,
+                            classState,
+                            getClassificationWaitStatusLabel(classState)
+                        )
+                    ) {
+                        return;
+                    }
+                }
+
                 if (noClassificationTaskId !== currentTaskId) {
-                    // เริ่มต้นการรอ task ใหม่
                     noClassificationTaskId = currentTaskId;
                     noClassificationStartedAt = now;
                     console.log(
-                        `⏳ task ใหม่ (${currentTaskId}) ยังไม่เจอ Classification — รอสูงสุด ${(noClassificationTimeoutMs / 1000).toFixed(1)} วิ ก่อน waveform recovery`
+                        `⏳ task ใหม่ (${currentTaskId}) ${waitLabel} — รอสูงสุด ${(recoveryDelayMs / 1000).toFixed(1)} วิ ก่อน waveform recovery`
                     );
-                    setStatus(`task ${currentTaskId}: รอ Classification... · ${getNoTargetFilterStatusHint()}`);
+                    setStatus(`task ${currentTaskId}: ${waitLabel}... · ${getNoTargetFilterStatusHint()}`);
                 } else {
                     const waited = now - noClassificationStartedAt;
-                    if (waited >= noClassificationTimeoutMs) {
-                        console.log(
-                            `🔧 task ${currentTaskId}: ไม่มี Classification เกิน ${noClassificationTimeoutMs}ms → waveform recovery`
-                        );
-                        setStatus(`task ${currentTaskId}: waveform recovery...`);
-                        noClassificationTaskId = "";
-                        noClassificationStartedAt = 0;
-                        isProcessing = true;
-                        (async () => {
-                            try {
-                                await runNoClassificationRecoveryFlow(currentTaskId);
-                            } catch (e) {
-                                console.warn("[DingTag] waveform recovery error:", e?.name, e?.message);
-                            } finally {
-                                await delay(1500);
-                                isProcessing = false;
-                                activeRunToken = 0;
-                                activeTimeouts = [];
-                                console.log("🔄 จบ waveform recovery — รอ task ใหม่...");
-                                if (isAutoPilotOn) setStatus("กำลังรอ task ใหม่...");
-                            }
-                        })();
-                        return;
+                    if (waited >= recoveryDelayMs) {
+                        if (
+                            scheduleNoClassificationRecoveryFromAutopilot(
+                                currentTaskId,
+                                classState,
+                                waitLabel
+                            )
+                        ) {
+                            return;
+                        }
                     }
                     if (now - lastNoTargetLogAt > 5000) {
                         lastNoTargetLogAt = now;
-                        const remaining = Math.max(0, (noClassificationTimeoutMs - waited) / 1000);
+                        const remaining = Math.max(0, (recoveryDelayMs - waited) / 1000);
                         console.log(
-                            `⏳ รอ Classification ใน task ${currentTaskId} อีก ~${remaining.toFixed(1)} วิ ก่อน waveform recovery`
+                            `⏳ ${waitLabel} ใน task ${currentTaskId} อีก ~${remaining.toFixed(1)} วิ ก่อน waveform recovery`
                         );
                         setStatus(
-                            `task ${currentTaskId}: รอ Classification (${remaining.toFixed(1)} วิ) · ${getNoTargetFilterStatusHint()}`
+                            `task ${currentTaskId}: ${waitLabel} (${remaining.toFixed(1)} วิ) · ${getNoTargetFilterStatusHint()}`
                         );
                     }
                 }
             } else {
-                // ไม่ครบเงื่อนไข auto-skip — รีเซ็ตการติดตามถ้ามี
                 if (noClassificationTaskId) {
                     noClassificationTaskId = "";
                     noClassificationStartedAt = 0;
                 }
                 if (now - lastNoTargetLogAt > 5000) {
                     lastNoTargetLogAt = now;
+                    const waitLabel = getClassificationWaitStatusLabel(classState);
+                    const extra = "";
                     console.log(
-                        "⏳ ON อยู่ แต่ยังไม่เจอ target (Classification: Valid/Invalid) — ตรวจหน้าเว็บ/DOM/สิทธิ์ Extension |",
+                        `⏳ ยังไม่พร้อม pipeline (${waitLabel})${extra} |`,
                         getNoTargetFilterStatusHint()
                     );
-                    setStatus(
-                        "ยังไม่เจอ target (รอ Classification Valid/Invalid...) · " +
-                            getNoTargetFilterStatusHint()
-                    );
+                    setStatus(`${waitLabel} · ${getNoTargetFilterStatusHint()}${extra}`);
                 }
 
                 // ─────── Auto-Filter recovery: ถ้า bot ไม่เจอ target นาน → apply filter อัตโนมัติ ───────

@@ -31,6 +31,8 @@ flowchart LR
 
 - ไม่กด Cancel skip → จบ pipeline แล้วไม่เจอ Update → bot อาจ Shift+↓ ซ้ำ งานไม่ถูกอัปเดตจริง
 - หลัง Cancel skip → UI กลับโหมด annotation → มี Update เมื่อทำครบ
+- **"No region" (คำของทีม)** = UI ว่างเหมือนรูป: ไม่มี Valid/Invalid ใน Annotation Item, มักขึ้น `No annotation items`, waveform ยังไม่มีช่วงเขียว — **ไม่ใช่**ข้อความใน combo เสมอไป
+- หลัง Cancel skip เข้าสถานะนี้ → `isAnnotationPanelEmpty()` + ไม่มี Valid/Invalid → waveform recovery **ทันที** (~0.6s)
 
 ---
 

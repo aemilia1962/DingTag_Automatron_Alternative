@@ -32,7 +32,9 @@ Port `54321`. CORS: `scale.dingtalk.com`.
 | `runTranscriptionPipeline` | ~5400 | Main auto pipeline |
 | `runInvalidToVerifiedFlow` | ~3900 | Invalid / no-recheck |
 | `runNoClassificationRecoveryFlow` | ~2968 | ไม่มี Classification: ซูม→ลาก→Valid→pipeline |
-| `ensureCancelSkipIfWasSkipped` | ~3655 | Was skipped → กด Cancel skip ก่อน pipeline/Update |
+| `getClassificationSidebarState` | ~2115 | valid / invalid / **no_region** / missing |
+| `shouldRunWaveformRecovery` | ~2168 | no_region เสมอ; missing ตาม toggle |
+| `ensureCancelSkipIfWasSkipped` | ~3720 | Was skipped → Cancel skip; no_region → recovery |
 | `isTaskWasSkipped` / `findCancelSkipButton` | ~3627 | `.lsf-controls__skipped-info` · `button[aria-label=cancel-skip]` |
 | `processedTaskIds` | 34 | Duplicate guard |
 
