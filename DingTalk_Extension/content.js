@@ -880,7 +880,7 @@ autoSkipToggle.type = "checkbox";
 autoSkipToggle.checked = autoSkipNoClassificationEnabled;
 autoSkipToggle.style.cursor = "pointer";
 autoSkipToggle.title =
-    "ถ้า task ใหม่ไม่มี Classification ภายในเวลาที่ตั้ง → ลาก waveform → กด Valid → pipeline ปกติ (ล้มเหลวจึง Shift+↓)";
+    "ถ้า task ใหม่ไม่มี Classification ภายในเวลาที่ตั้ง → Ctrl+Scroll ซูมออก waveform → ลากเต็มช่วง → กด Valid → pipeline ปกติ (ล้มเหลวจึง Shift+↓)";
 autoSkipRow.appendChild(autoSkipToggle);
 
 autoSkipLabel.addEventListener("click", () => {
@@ -2139,6 +2139,588 @@ function findWaveformCanvas() {
     );
 }
 
+function findLsfAudioTag() {
+    return document.querySelector(".lsf-audio-tag");
+}
+
+/**
+ * scroller จริงจาก DOM ที่ user ส่งมา:
+ * .lsf-audio-tag > div > div[style*="overflow: scroll hidden"]
+ */
+function findWaveformHorizontalScroller() {
+    const audioTag = findLsfAudioTag();
+    if (audioTag) {
+        for (const div of audioTag.querySelectorAll("div")) {
+            const st = div.style;
+            const ox = (st.overflowX || st.overflow || "").toLowerCase();
+            if (ox.includes("scroll") || ox.includes("auto")) return div;
+        }
+    }
+    const canvas = findWaveformCanvas();
+    if (!canvas) return null;
+    let el = canvas.parentElement;
+    for (let depth = 0; depth < 14 && el; depth++) {
+        if (el.scrollWidth > el.clientWidth + 3) return el;
+        const cs = getComputedStyle(el);
+        const ox = cs.overflowX;
+        const oy = cs.overflow;
+        if (
+            (ox === "auto" || ox === "scroll" || oy === "auto" || oy === "scroll") &&
+            el.scrollHeight > el.clientHeight + 3
+        ) {
+            return el;
+        }
+        el = el.parentElement;
+    }
+    return canvas.parentElement || canvas;
+}
+
+/** แถบ absolute ใต้ waveform (ใช้ประกอบ ratio — ไม่ยึดค่า px คงที่ตามจอ) */
+function findWaveformScrollTrackElement() {
+    const audioTag = findLsfAudioTag();
+    if (!audioTag) return null;
+    let best = null;
+    let bestW = 0;
+    for (const div of audioTag.querySelectorAll("div")) {
+        const st = div.style;
+        if (st.position !== "absolute") continue;
+        if (!String(st.top || "").includes("100")) continue;
+        const w = div.getBoundingClientRect().width || div.offsetWidth || 0;
+        if (w > bestW) {
+            bestW = w;
+            best = div;
+        }
+    }
+    return best;
+}
+
+/**
+ * วัดซูมแบบไม่พึ่งขนาดจอ (ใช้สัดส่วนเท่านั้น)
+ * - scrollRatio = scroller.scrollWidth / clientWidth (หลัก — อัปเดตตาม viewport)
+ * - trackRatio  = ความกว้างแถบ scroll track / viewport (สำรอง)
+ * ซูมออกพอเมื่อ ratio ≈ 1.0 · ซูมเข้าเมื่อ ratio >> 1 (เช่น ~2.0 ไม่ว่า viewport กี่ px)
+ */
+function getWaveformZoomMetrics() {
+    const scroller = findWaveformHorizontalScroller();
+    const canvas = findWaveformCanvas();
+    const canvasRect = canvas?.getBoundingClientRect();
+    const viewportW =
+        scroller?.clientWidth ||
+        canvasRect?.width ||
+        null;
+
+    const scrollContentW = scroller?.scrollWidth || null;
+    const scrollRatio =
+        scrollContentW && viewportW
+            ? scrollContentW / Math.max(1, viewportW)
+            : null;
+
+    const trackEl = findWaveformScrollTrackElement();
+    const trackLayoutW = trackEl?.getBoundingClientRect().width || null;
+    const trackStyleW = trackEl?.style?.width
+        ? parseFloat(trackEl.style.width)
+        : null;
+    const trackW = trackLayoutW || trackStyleW || scrollContentW || null;
+    const trackRatio =
+        trackW && viewportW ? trackW / Math.max(1, viewportW) : null;
+
+    const contentW = scrollContentW || trackW;
+    const ratio = scrollRatio ?? trackRatio;
+    const overflowPx = scroller
+        ? Math.max(0, (scrollContentW || scroller.scrollWidth) - scroller.clientWidth)
+        : Infinity;
+    const overflowRatio =
+        viewportW && Number.isFinite(overflowPx)
+            ? overflowPx / Math.max(1, viewportW)
+            : null;
+
+    return {
+        scroller,
+        trackEl,
+        trackW,
+        viewportW,
+        contentW,
+        ratio,
+        scrollRatio,
+        trackRatio,
+        overflowPx,
+        overflowRatio,
+    };
+}
+
+function getWaveformHorizontalOverflowPx() {
+    return getWaveformZoomMetrics().overflowPx;
+}
+
+const WAVEFORM_ZOOM_FIT_MAX_RATIO = 1.05;
+const WAVEFORM_ZOOM_FIT_MAX_OVERFLOW_RATIO = 0.02;
+/** ปลาย timeline ที่มองเห็น vs duration รวม — ใช้ gap วินาที (ป้ายมักปัดเป็น 18.75 ทั้งที่ไฟล์ 19.4s) */
+const WAVEFORM_MAX_TIMELINE_END_GAP_SEC = 0.85;
+const WAVEFORM_MAX_TIMELINE_END_GAP_RATIO = 0.05;
+
+function getWaveformTimelineCoverageRatio() {
+    const total = getWaveformTotalDurationSec();
+    const timelineEnd = collectTimecodeSecondsNearWaveform().timelineEndSec;
+    if (!total || !timelineEnd) return null;
+    return timelineEnd / total;
+}
+
+function getWaveformTimelineEndGapSec() {
+    const total = getWaveformTotalDurationSec();
+    const timelineEnd = collectTimecodeSecondsNearWaveform().timelineEndSec;
+    if (!total || !timelineEnd) return null;
+    return Math.max(0, total - timelineEnd);
+}
+
+function isWaveformTimelineSpanAdequate() {
+    const gap = getWaveformTimelineEndGapSec();
+    const total = getWaveformTotalDurationSec();
+    if (gap == null || !total) return null;
+    const maxGap = Math.max(
+        WAVEFORM_MAX_TIMELINE_END_GAP_SEC,
+        total * WAVEFORM_MAX_TIMELINE_END_GAP_RATIO
+    );
+    return gap <= maxGap;
+}
+
+function isWaveformZoomedToFit() {
+    const zm = getWaveformZoomMetrics();
+    if (zm.scrollRatio != null && zm.scrollRatio <= WAVEFORM_ZOOM_FIT_MAX_RATIO) {
+        return true;
+    }
+    if (zm.trackRatio != null && zm.trackRatio <= WAVEFORM_ZOOM_FIT_MAX_RATIO) {
+        return true;
+    }
+    if (zm.ratio != null && zm.ratio <= WAVEFORM_ZOOM_FIT_MAX_RATIO) {
+        return true;
+    }
+    if (
+        zm.overflowRatio != null &&
+        zm.overflowRatio <= WAVEFORM_ZOOM_FIT_MAX_OVERFLOW_RATIO
+    ) {
+        return true;
+    }
+    return false;
+}
+
+/** พร้อมลาก region เต็ม: ซูมพอ + ปลาย timeline ใกล้ duration รวม */
+function isWaveformReadyForFullRegionDrag() {
+    if (!isWaveformZoomedToFit()) return false;
+    const spanOk = isWaveformTimelineSpanAdequate();
+    if (spanOk == null) return true;
+    return spanOk;
+}
+
+/** duration รวมจาก [data-testid="timebox-end-time"] เช่น 00:00:19:400 */
+function getWaveformTotalDurationSec() {
+    const inp =
+        document.querySelector('[data-testid="timebox-end-time"] input') ||
+        document.querySelector(
+            '.lsf-timer-duration-control input[readonly], .lsf-timer-duration-control input.lsf-time-box__input-time[readonly]'
+        );
+    if (inp?.value) {
+        const sec = parseTimecodeToSec(inp.value);
+        if (sec != null) return sec;
+    }
+    const fromDom = collectTimecodeSecondsNearWaveform().totalSec;
+    return fromDom;
+}
+
+function scrollWaveformToStart() {
+    const scroller = findWaveformHorizontalScroller();
+    if (!scroller) return;
+    try {
+        scroller.scrollLeft = 0;
+    } catch {}
+}
+
+/**
+ * จำลอง Ctrl+Scroll บน waveform — บน Windows มักเป็น scroll ลง = ซูมออก (deltaY > 0)
+ * ส่งทั้ง canvas และ scroller parent เผื่อ handler ผูกคนละ node
+ */
+function dispatchWaveformZoomWheel(el, { zoomOut = true, deltaMagnitude = 120 } = {}) {
+    if (!el) return;
+    const rect = el.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
+    const x = rect.left + Math.max(1, rect.width) / 2;
+    const y = rect.top + Math.max(1, rect.height) / 2;
+    const deltaY = zoomOut ? Math.abs(deltaMagnitude) : -Math.abs(deltaMagnitude);
+    const base = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+        screenX: x,
+        screenY: y,
+        ctrlKey: true,
+        deltaY,
+        deltaX: 0,
+        deltaMode: 0,
+    };
+    try {
+        el.dispatchEvent(new WheelEvent("wheel", base));
+    } catch {
+        try {
+            el.dispatchEvent(new WheelEvent("wheel", { ...base, deltaY }));
+        } catch {}
+    }
+}
+
+/** ซูมออกจนเห็น waveform เต็มความกว้าง (ก่อนลากสร้าง region) */
+async function zoomWaveformOutToFit({ maxSteps = 28, stepDelayMs = 85 } = {}) {
+    const canvas = findWaveformCanvas();
+    if (!canvas) {
+        console.warn("[DingTag] zoomWaveformOutToFit: ไม่พบ waveform canvas");
+        return { ok: false, reason: "no_canvas", steps: 0 };
+    }
+    try {
+        canvas.scrollIntoView?.({ block: "center", inline: "nearest" });
+    } catch {}
+    scrollWaveformToStart();
+    if (isWaveformReadyForFullRegionDrag()) {
+        const zm0 = getWaveformZoomMetrics();
+        const gap = getWaveformTimelineEndGapSec();
+        console.log(
+            `[DingTag] waveform พร้อมลาก region (scrollRatio ${zm0.scrollRatio?.toFixed(3)}, endGap ${gap?.toFixed(2) ?? "?"}s)`
+        );
+        return { ok: true, reason: "already_fit", steps: 0 };
+    }
+
+    const wheelTargets = () => {
+        const scroller = findWaveformHorizontalScroller();
+        const audioTag = findLsfAudioTag();
+        const list = [canvas];
+        if (scroller && scroller !== canvas) list.push(scroller);
+        if (audioTag) list.push(audioTag);
+        return list;
+    };
+
+    let lastRatio = getWaveformZoomMetrics().ratio ?? Infinity;
+    let stagnant = 0;
+    for (let step = 1; step <= maxSteps; step++) {
+        for (const t of wheelTargets()) {
+            dispatchWaveformZoomWheel(t, { zoomOut: true });
+        }
+        await delay(stepDelayMs);
+        scrollWaveformToStart();
+
+        if (isWaveformReadyForFullRegionDrag()) {
+            const zm = getWaveformZoomMetrics();
+            const gap = getWaveformTimelineEndGapSec();
+            console.log(
+                `[DingTag] waveform พร้อมลาก region (${step} ครั้ง, scrollRatio ${zm.scrollRatio?.toFixed(3)}, endGap ${gap?.toFixed(2) ?? "?"}s)`
+            );
+            return { ok: true, reason: "fit", steps: step };
+        }
+
+        const zmStep = getWaveformZoomMetrics();
+        const ratio = zmStep.scrollRatio ?? zmStep.ratio ?? lastRatio;
+        if (ratio >= lastRatio - 0.02) {
+            stagnant++;
+        } else {
+            stagnant = 0;
+        }
+        lastRatio = ratio;
+        if (stagnant >= 4) {
+            const zm = getWaveformZoomMetrics();
+            console.log(
+                `[DingTag] waveform ซูมออกหยุดเปลี่ยน (${step} ครั้ง, scrollRatio ${zm.scrollRatio?.toFixed(3)}) — ใช้ระดับปัจจุบัน`
+            );
+            return { ok: isWaveformReadyForFullRegionDrag(), reason: "stagnant", steps: step };
+        }
+    }
+
+    const zm = getWaveformZoomMetrics();
+    const gap = getWaveformTimelineEndGapSec();
+    console.warn(
+        `[DingTag] waveform ซูมครบ ${maxSteps} ครั้ง — scrollRatio ${zm.scrollRatio?.toFixed(3)}, endGap ${gap?.toFixed(2) ?? "?"}s`
+    );
+    return { ok: isWaveformReadyForFullRegionDrag(), reason: "max_steps", steps: maxSteps };
+}
+
+/** container รอบ waveform (timeline + canvas + scrollbar) */
+function findWaveformRoot() {
+    return findLsfAudioTag() || findWaveformCanvas()?.closest?.(".lsf-audio-tag") || findWaveformCanvas();
+}
+
+/** แปลง 00:00:19:400 / 00:00:17.500 → วินาที */
+function parseTimecodeToSec(raw) {
+    const t = String(raw || "").trim();
+    if (!t) return null;
+    let m = t.match(/^(\d+):(\d+):(\d+):(\d{1,3})$/);
+    if (m) return +m[1] * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000;
+    m = t.match(/^(\d+):(\d+):(\d+)\.(\d{1,3})$/);
+    if (m) return +m[1] * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000;
+    m = t.match(/^(\d+):(\d+):(\d+)$/);
+    if (m) return +m[1] * 3600 + +m[2] * 60 + +m[3];
+    m = t.match(/^(\d+):(\d+)\.(\d{1,3})$/);
+    if (m) return +m[1] * 60 + +m[2] + +m[3] / 1000;
+    return null;
+}
+
+function collectTimecodeSecondsNearWaveform() {
+    const root = findWaveformRoot();
+    const canvas = findWaveformCanvas();
+    if (!root || !canvas) return { totalSec: null, timelineEndSec: null, samples: [] };
+    const cRect = canvas.getBoundingClientRect();
+    const re = /\d{1,2}:\d{2}(?::\d{2})?(?:[.:]\d{1,3})?/g;
+    const timelineSecs = [];
+    const allSecs = [];
+
+    for (const el of root.querySelectorAll("*")) {
+        if (el.children.length > 0) continue;
+        const text = (el.textContent || "").trim();
+        if (!text || text.length > 24) continue;
+        const matches = text.match(re);
+        if (!matches) continue;
+        for (const token of matches) {
+            const sec = parseTimecodeToSec(token);
+            if (sec == null || sec > 24 * 3600) continue;
+            allSecs.push(sec);
+            const r = el.getBoundingClientRect();
+            if (
+                r.width > 0 &&
+                r.top >= cRect.top - 36 &&
+                r.bottom <= cRect.top + 28
+            ) {
+                timelineSecs.push(sec);
+            }
+        }
+    }
+
+    const totalSec = allSecs.length ? Math.max(...allSecs) : null;
+    const timelineEndSec = timelineSecs.length ? Math.max(...timelineSecs) : null;
+    return { totalSec, timelineEndSec, samples: allSecs };
+}
+
+/** วัดแถบ region ใน DOM (ถ้ามี overlay แยกจาก canvas) */
+function measureDomRegionBarAgainstCanvas() {
+    const canvas = findWaveformCanvas();
+    const root = findWaveformRoot();
+    if (!canvas || !root) return { found: false, reason: "no_canvas_or_root" };
+
+    const cRect = canvas.getBoundingClientRect();
+    let best = null;
+
+    for (const el of root.querySelectorAll(
+        "div, span, [class*='region' i], [class*='segment' i], [class*='selection' i]"
+    )) {
+        const cls = String(el.className || "");
+        if (cls.length > 200) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < cRect.width * 0.25 || r.height < 2 || r.height > 48) continue;
+        if (r.top < cRect.top - 8 || r.bottom > cRect.bottom + 36) continue;
+        if (r.right < cRect.left + 4 || r.left > cRect.right - 4) continue;
+        const widthRatio = r.width / Math.max(1, cRect.width);
+        const leftInset = (r.left - cRect.left) / Math.max(1, cRect.width);
+        const rightInset = (cRect.right - r.right) / Math.max(1, cRect.width);
+        const score = widthRatio - leftInset * 0.35 - rightInset * 0.35;
+        if (!best || score > best.score) {
+            best = {
+                score,
+                widthRatio,
+                leftInset,
+                rightInset,
+                className: cls.slice(0, 120),
+                tag: el.tagName,
+            };
+        }
+    }
+
+    if (!best) return { found: false, reason: "no_dom_bar" };
+    return { found: true, ...best };
+}
+
+/** ประมาณความกว้าง highlight บน canvas (region อาจวาดบน #waveform-layer-main โดยตรง) */
+function estimateRegionWidthRatioFromCanvas() {
+    const canvas = findWaveformCanvas();
+    if (!canvas || canvas.width < 20 || canvas.height < 20) {
+        return { found: false, reason: "no_canvas" };
+    }
+    try {
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return { found: false, reason: "no_ctx" };
+        const w = canvas.width;
+        const h = canvas.height;
+        const yRows = [0.55, 0.68, 0.78].map((r) => Math.floor(h * r));
+        const isSelectionPx = (r, g, b, a) =>
+            a > 25 && g > 140 && g >= r + 10 && g >= b + 10;
+        const isBg = (r, g, b, a, ref) =>
+            a < 8 ||
+            (Math.abs(r - ref[0]) < 14 &&
+                Math.abs(g - ref[1]) < 14 &&
+                Math.abs(b - ref[2]) < 14);
+
+        let left = w;
+        let right = 0;
+        let activeCols = 0;
+        for (const y of yRows) {
+            const ref = ctx.getImageData(2, y, 1, 1).data;
+            for (let x = 0; x < w; x++) {
+                const px = ctx.getImageData(x, y, 1, 1).data;
+                if (
+                    isSelectionPx(px[0], px[1], px[2], px[3]) ||
+                    !isBg(px[0], px[1], px[2], px[3], ref)
+                ) {
+                    left = Math.min(left, x);
+                    right = Math.max(right, x);
+                    activeCols++;
+                }
+            }
+        }
+        if (activeCols < Math.max(8, w * 0.08)) {
+            return { found: false, reason: "no_highlight_band", activeCols, w };
+        }
+        const widthRatio = (right - left + 1) / w;
+        const leftInset = left / w;
+        const rightInset = (w - 1 - right) / w;
+        return {
+            found: true,
+            method: "canvas_scan",
+            widthRatio,
+            leftInset,
+            rightInset,
+            activeCols,
+            w,
+        };
+    } catch (e) {
+        return { found: false, reason: "canvas_read_blocked", detail: e?.message };
+    }
+}
+
+/**
+ * ตรวจว่า region ครอบ waveform เต็มพอหรือไม่ (หลังลาก)
+ * - DOM bar width (ถ้ามี)
+ * - canvas highlight width (region วาดบน canvas)
+ * - timeline ปลายสุดที่มองเห็น เทียบ duration รวม
+ */
+function verifyWaveformRegionCoverage({
+    minBarWidthRatio = 0.93,
+    maxEdgeInset = 0.06,
+    requireZoomFit = true,
+} = {}) {
+    const canvas = findWaveformCanvas();
+    const cRect = canvas?.getBoundingClientRect();
+    const zoom = getWaveformZoomMetrics();
+    const zoomFit = isWaveformZoomedToFit();
+    const times = collectTimecodeSecondsNearWaveform();
+    const domBar = measureDomRegionBarAgainstCanvas();
+    const canvasBar = estimateRegionWidthRatioFromCanvas();
+
+    const totalSec = times.totalSec;
+    const timelineEndSec = times.timelineEndSec;
+    const timelineCoverage =
+        totalSec && timelineEndSec ? timelineEndSec / totalSec : null;
+    const timelineEndGap = getWaveformTimelineEndGapSec();
+    const spanOk = isWaveformTimelineSpanAdequate();
+
+    const metrics = {
+        zoomFit,
+        zoomRatio: zoom.ratio,
+        scrollRatio: zoom.scrollRatio,
+        trackRatio: zoom.trackRatio,
+        viewportWidthPx: zoom.viewportW,
+        overflowRatio: zoom.overflowRatio,
+        totalSec,
+        timelineEndSec,
+        timelineCoverage,
+        timelineEndGap,
+        timelineSpanOk: spanOk,
+        domBar,
+        canvasBar,
+        canvasWidth: cRect ? Math.round(cRect.width) : null,
+    };
+
+    if (requireZoomFit && !zoomFit) {
+        return { ok: false, reason: "not_zoomed_fit", metrics };
+    }
+    if (spanOk === false) {
+        return { ok: false, reason: "timeline_end_gap", metrics };
+    }
+
+    if (domBar.found) {
+        const edgeOk =
+            (domBar.leftInset ?? 1) <= maxEdgeInset &&
+            (domBar.rightInset ?? 1) <= maxEdgeInset;
+        const widthOk = domBar.widthRatio >= minBarWidthRatio;
+        if (widthOk && edgeOk) {
+            return { ok: true, reason: "dom_bar_full", metrics };
+        }
+        return { ok: false, reason: "dom_bar_partial", metrics };
+    }
+
+    if (canvasBar.found) {
+        const edgeOk =
+            (canvasBar.leftInset ?? 1) <= maxEdgeInset &&
+            (canvasBar.rightInset ?? 1) <= maxEdgeInset;
+        const widthOk = canvasBar.widthRatio >= minBarWidthRatio;
+        if (widthOk && edgeOk) {
+            return { ok: true, reason: "canvas_highlight_full", metrics };
+        }
+        return { ok: false, reason: "canvas_highlight_partial", metrics };
+    }
+
+    if (spanOk === true && (canvasBar.found ? canvasBar.widthRatio >= 0.88 : true)) {
+        return { ok: true, reason: "timeline_span_ok", metrics };
+    }
+
+    return { ok: false, reason: "coverage_unknown", metrics };
+}
+
+/** ซูมออก → ลาก → verify; ไม่ผ่านจะ retry */
+async function createFullWaveformRegionWithVerify(runToken, { maxAttempts = 3 } = {}) {
+    let lastVerify = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (!isRunActive(runToken)) {
+            return { ok: false, reason: "stale", attempt, verify: lastVerify };
+        }
+
+        const zoomRes = await zoomWaveformOutToFit({
+            maxSteps: attempt === 1 ? 32 : 18,
+        });
+        await delay(350);
+        if (!isRunActive(runToken)) {
+            return { ok: false, reason: "stale", attempt, verify: lastVerify };
+        }
+
+        scrollWaveformToStart();
+        const dragRes = await dragWaveformFull({
+            edgePx: 0,
+            steps: 20 + attempt * 4,
+        });
+        if (!dragRes.ok) {
+            return { ok: false, reason: dragRes.reason, attempt, zoomRes, verify: lastVerify };
+        }
+        await delay(450);
+
+        lastVerify = verifyWaveformRegionCoverage();
+        console.log(
+            `[DingTag] region verify (attempt ${attempt}/${maxAttempts}):`,
+            lastVerify.ok ? "OK" : "FAIL",
+            lastVerify.reason,
+            lastVerify.metrics
+        );
+
+        if (lastVerify.ok) {
+            return {
+                ok: true,
+                reason: lastVerify.reason,
+                attempt,
+                zoomRes,
+                verify: lastVerify,
+            };
+        }
+    }
+
+    return {
+        ok: false,
+        reason: "region_not_full",
+        attempt: maxAttempts,
+        verify: lastVerify,
+    };
+}
+
 function dispatchPointerMouseChain(el, type, x, y, buttons = 0) {
     if (!el) return;
     const base = {
@@ -2204,25 +2786,55 @@ function dispatchDragOnElement(el, x0, y0, x1, y1, steps = 12) {
     return true;
 }
 
-/** ลากเต็มความกว้าง waveform canvas (ซ้าย→ขวา) */
-async function dragWaveformFull({ startRatio = 0.02, endRatio = 0.98, steps = 14 } = {}) {
+/**
+ * ลากเต็มความกว้าง timeline หลังซูมออก
+ * - X จาก scroll viewport (overflow: scroll) ไม่ใช่ขอบ canvas อย่างเดียว
+ * - Y กลาง canvas (ชั้นคลื่นเสียง)
+ * - ยิง event บน scroller เป็นหลัก (LSF ผูก timeline กับ scroll + spacer)
+ */
+async function dragWaveformFull({ edgePx = 0, steps = 22 } = {}) {
     const canvas = findWaveformCanvas();
     if (!canvas) {
         console.warn("[DingTag] dragWaveformFull: ไม่พบ waveform canvas");
         return { ok: false, reason: "no_canvas" };
     }
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
+    const scroller = findWaveformHorizontalScroller();
+    if (!scroller) {
+        console.warn("[DingTag] dragWaveformFull: ไม่พบ scroll container");
+        return { ok: false, reason: "no_scroller" };
+    }
+
+    const scrollRect = scroller.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    if (scrollRect.width <= 8 || canvasRect.height <= 8) {
         return { ok: false, reason: "zero_size" };
     }
-    const y = rect.top + rect.height / 2;
-    const xStart = rect.left + rect.width * startRatio;
-    const xEnd = rect.left + rect.width * endRatio;
-    dispatchDragOnElement(canvas, xStart, y, xEnd, y, steps);
+
+    const pad = Math.max(0, edgePx);
+    const xStart = scrollRect.left + pad;
+    const xEnd = scrollRect.right - pad;
+    const y = canvasRect.top + canvasRect.height / 2;
+
+    try {
+        canvas.scrollIntoView?.({ block: "center", inline: "nearest" });
+    } catch {}
+    scrollWaveformToStart();
+
+    dispatchDragOnElement(scroller, xStart, y, xEnd, y, steps);
+
     console.log(
-        `[DingTag] ลาก waveform เต็มช่วง @ (${xStart.toFixed(0)},${y.toFixed(0)}) → (${xEnd.toFixed(0)},${y.toFixed(0)})`
+        `[DingTag] ลาก waveform เต็มช่วง (scroll div) pad=${pad}px ` +
+            `(${xStart.toFixed(0)},${y.toFixed(0)}) → (${xEnd.toFixed(0)},${y.toFixed(0)}) ` +
+            `scrollW=${scrollRect.width.toFixed(0)} canvasW=${canvasRect.width.toFixed(0)}`
     );
-    return { ok: true, reason: "dragged" };
+    return {
+        ok: true,
+        reason: "dragged_scroller",
+        xStart,
+        xEnd,
+        scrollWidth: scrollRect.width,
+        canvasWidth: canvasRect.width,
+    };
 }
 
 async function waitForClassificationRow(timeoutMs = 8000) {
@@ -2351,7 +2963,7 @@ async function fallbackSkipNoClassification(taskId) {
 }
 
 /**
- * ไม่เจอ Classification: ลาก waveform เต็มช่วง → กด Valid (lsf-label) → pipeline Classification ปกติ
+ * ไม่เจอ Classification: ซูมออก waveform (Ctrl+Scroll) → ลากเต็มช่วง → กด Valid → pipeline Classification ปกติ
  */
 async function runNoClassificationRecoveryFlow(currentTaskId) {
     const pipelineTaskId = currentTaskId;
@@ -2363,18 +2975,27 @@ async function runNoClassificationRecoveryFlow(currentTaskId) {
     noClassificationStartedAt = 0;
 
     try {
-        setStatus(`task ${pipelineTaskId}: ลาก waveform...`);
         scrollSidebarToActiveTask();
         await delay(READ_DELAY_MS);
         if (!isRunActive(runToken)) return;
 
-        const dragRes = await dragWaveformFull();
-        if (!dragRes.ok) {
-            setStatus(`ลาก waveform ไม่ได้ (${dragRes.reason}) → Shift+↓`);
+        setStatus(`task ${pipelineTaskId}: ซูมออก + ลาก region + verify...`);
+        const regionRes = await createFullWaveformRegionWithVerify(runToken, { maxAttempts: 3 });
+        if (!regionRes.ok) {
+            const vr = regionRes.verify?.reason || regionRes.reason;
+            console.warn(
+                "[DingTag] recovery: region ไม่ครอบ waveform เต็ม —",
+                vr,
+                regionRes.verify?.metrics
+            );
+            setStatus(`region ไม่เต็ม (${vr}) → Shift+↓`);
             await fallbackSkipNoClassification(pipelineTaskId);
             return;
         }
-        await delay(600);
+        console.log(
+            `[DingTag] recovery: region OK (${regionRes.reason}, attempt ${regionRes.attempt})`
+        );
+        await delay(350);
         if (!isRunActive(runToken)) return;
 
         setStatus("recovery: กด Valid...");
