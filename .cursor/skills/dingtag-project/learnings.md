@@ -20,6 +20,30 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — Loop "มี region แล้ว" แต่ No annotation items
+
+- **Symptom:** log ซ้ำ `recovery: มี region แล้ว — กด Valid` ทั้งที่ waveform ไม่มีช่วงเขียว / sidebar No annotation items
+- **Root cause:** `hasAdequateExistingWaveformRegion` false positive จาก waveform เทา (threshold ต่ำ + partial_region)
+- **Fix:** ถ้ามี `No annotation items` = ไม่มี region; ต้อง highlight เขียวชัด; กด Valid แล้วไม่ขึ้น sidebar → ลากใหม่; cooldown recovery 10s (ext 1.8.7)
+- **Verify:** ยังไม่ทด — task 11383142
+- **Tags:** false_positive, loop, region
+
+## 2026-05-21 — ลดการเช็ค sidebar ก่อนลาก+Valid
+
+- **Symptom:** ต้องลาก+กด Valid ก่อน Classification ขึ้น sidebar — bot รอ "ไม่เจอ target" นาน
+- **Root cause:** ใช้ `scanClassificationTarget` (sidebar) เป็นเงื่อนไขเริ่มงาน — ใน LS มันขึ้นทีหลัง label
+- **Fix:** `needsPrePipelineAnnotationSteps` = !sidebar; autopilot เข้า recovery ทันที; รอ sidebar แค่หลังกด Valid (ext 1.8.6)
+- **Verify:** ยังไม่ทด
+- **Tags:** sidebar, workflow, over-check
+
+## 2026-05-21 — Sidebar ว่างแต่มี Valid/Invalid กลางจอ
+
+- **Symptom:** No annotation items + ปุ่ม Valid/Invalid กลางจอ — status บอก "ยังไม่มี Valid-Invalid" ค้าง
+- **Root cause:** `scanClassificationTarget` อ่านแค่ sidebar; `partial_region` บล็อก recovery ผิด; `processedTaskIds` บล็อกหลังเคย Update
+- **Fix:** `getCenterPanelClassificationState`, `canRunRecoveryForTask`, ลบ partial_region หลวม; kick เมื่อมีปุ่มกลางจอแต่ไม่มี sidebar (ext 1.8.5)
+- **Verify:** ยังไม่ทด
+- **Tags:** sidebar, center-label, recovery
+
 ## 2026-05-21 — หลัง Cancel skip ค้าง status รอ target ยาว
 
 - **Symptom:** กด Cancel skip เอง → สถานะ `ไม่มี region / ยังไม่มี Valid-Invalid · ไม่มีปุ่ม Filters` ค้างนาน
