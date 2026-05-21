@@ -20,6 +20,14 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — ค้าง "ลาก region + กด Valid" ไม่ลากจริง
+
+- **Symptom:** status `task …: ลาก region + กด Valid (Classification ขึ้น sidebar หลังนั้น)...` ค้างยาว ไม่เห็น recovery ใน Console
+- **Root cause:** `canRunRecoveryForTask` คืน false เมื่อ task อยู่ใน `processedTaskIds` แม้ sidebar ยังไม่มี Classification; cooldown 10s กัน schedule ซ้ำ; idle branch แค่ setStatus ไม่มี watchdog
+- **Fix:** needsPrep → `canRunRecovery` เสมอ; cooldown เฉพาะเมื่อมี Classification แล้ว; จับเวลา `noClassificationTaskId` → schedule หลัง ~300ms หรือ Shift+↓ หลัง stuck timeout; ext 1.8.11
+- **Verify:** ยังไม่ทด — task 11383157
+- **Tags:** stuck_status, processedTaskIds, needsPrep
+
 ## 2026-05-21 — ค้างที่ "ส่ง Shift+↓" หลัง Cancel skip
 
 - **Symptom:** status ค้าง `ส่ง Shift+↓ ไป task ถัดไปแล้ว`; Console `ReferenceError: taskId is not defined` ที่ `kickPostCancelSkipHandling` finally

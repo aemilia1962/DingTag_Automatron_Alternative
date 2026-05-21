@@ -15,6 +15,24 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — แก้ค้างสถานะ "ลาก region + กด Valid" ไม่เริ่ม recovery
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** `canRunRecoveryForTask` อนุญาตเมื่อยังไม่มี Classification; ไม่ใช้ cooldown ขณะ needsPrep; watchdog + Shift+↓ หลัง stuck timeout; status นับถอยหลัง; ext **1.8.11**
+- **Files:** `content.js`, `manifest.json`, `learnings.md`
+- **Tags:** stuck_status, recovery, needsPrep
+
+## 2026-05-21 — จด Master flow ใน flows.md
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** รวม flow ทั้งระบบแผ่นเดียว (mermaid) + สารบัญ Pipeline / Invalid / Auto-Filter / สถาปัตยกรรม
+- **Files:** `.cursor/skills/dingtag-project/flows.md`
+- **Tags:** docs, flowchart, master-flow
+
 ## 2026-05-21 — แก้ค้างหลัง Cancel skip (taskId ReferenceError)
 
 - **Status:** done

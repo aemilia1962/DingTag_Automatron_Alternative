@@ -44,6 +44,9 @@ let postCancelSkipKickInFlight = false;
 let lastRecoveryEndedAt = 0;
 let lastRecoveryEndedTaskId = "";
 const RECOVERY_REPEAT_COOLDOWN_MS = 10000;
+/** กัน schedule recovery ถี่เกินเมื่อยังไม่มี Classification */
+let prepRecoveryLastScheduleAt = 0;
+const PREP_RECOVERY_DEBOUNCE_MS = 1200;
 /** กัน recovery ซ้อน (สาเหตุเสียงเล่นซ้ำ / ลากไม่ทัน DOM) */
 let activeRecoveryTaskId = "";
 // ตรวจจับเมื่อ task เด้งกลับบนสุด (bounce detection)
@@ -2255,10 +2258,10 @@ function needsPrePipelineAnnotationSteps() {
     return !scanClassificationTarget();
 }
 
-/** อนุญาต recovery แม้เคย Update แล้ว ถ้า annotation ถูกล้าง (เช่น หลัง Cancel skip) */
+/** อนุญาต recovery — ถ้ายังไม่มี Classification ใน sidebar ต้องลาก+Valid ได้เสมอ (แม้เคย Update) */
 function canRunRecoveryForTask(taskId) {
     if (!taskId) return false;
-    if (needsPrePipelineAnnotationSteps() && isAnnotationPanelEmpty()) return true;
+    if (needsPrePipelineAnnotationSteps()) return true;
     return !processedTaskIds.has(taskId);
 }
 
@@ -2398,8 +2401,18 @@ function getWaveformRecoveryDelayMs(state) {
     return noClassificationTimeoutMs;
 }
 
-function getClassificationWaitStatusLabel(state) {
+function getClassificationWaitStatusLabel(state, { waitedMs = 0, maxWaitMs = 0 } = {}) {
     if (scanClassificationTarget()) return "พร้อม pipeline";
+    if (!autoSkipNoClassificationEnabled) {
+        return "เปิด Waveform recovery ใน Settings เพื่อลาก region อัตโนมัติ";
+    }
+    if (isProcessing || activeRecoveryTaskId || postCancelSkipKickInFlight) {
+        return "กำลังลาก region + Valid...";
+    }
+    if (maxWaitMs > 0 && waitedMs < maxWaitMs) {
+        const left = Math.max(0, (maxWaitMs - waitedMs) / 1000).toFixed(1);
+        return `รอเริ่ม recovery (${left}s)`;
+    }
     return "ลาก region + กด Valid (Classification ขึ้น sidebar หลังนั้น)";
 }
 
@@ -3280,22 +3293,30 @@ function scheduleNoClassificationRecoveryFromAutopilot(currentTaskId, classState
     if (!currentTaskId || isProcessing || activeRecoveryTaskId || postCancelSkipKickInFlight) {
         return false;
     }
+    if (!autoSkipNoClassificationEnabled) return false;
     if (!canRunRecoveryForTask(currentTaskId)) return false;
+    if (scanClassificationTarget()) {
+        return false;
+    }
+    if (!shouldRunWaveformRecovery(classState)) return false;
+
+    const stillNeedsPrep = needsPrePipelineAnnotationSteps();
+    const now = Date.now();
+    if (now - prepRecoveryLastScheduleAt < PREP_RECOVERY_DEBOUNCE_MS) {
+        return false;
+    }
     if (
+        !stillNeedsPrep &&
         currentTaskId === lastRecoveryEndedTaskId &&
-        Date.now() - lastRecoveryEndedAt < RECOVERY_REPEAT_COOLDOWN_MS &&
-        !scanClassificationTarget()
+        now - lastRecoveryEndedAt < RECOVERY_REPEAT_COOLDOWN_MS
     ) {
         console.warn(
             `[DingTag] ข้าม recovery ซ้ำ task ${currentTaskId} (cooldown ${RECOVERY_REPEAT_COOLDOWN_MS}ms)`
         );
         return false;
     }
-    if (scanClassificationTarget()) {
-        return false;
-    }
-    if (!shouldRunWaveformRecovery(classState)) return false;
 
+    prepRecoveryLastScheduleAt = now;
     noClassificationTaskId = "";
     noClassificationStartedAt = 0;
     isProcessing = true;
@@ -6610,19 +6631,64 @@ setInterval(() => {
             return;
         }
 
-        if (
-            !isProcessing &&
-            !postCancelSkipKickInFlight &&
-            !activeRecoveryTaskId &&
-            currentTaskId &&
-            canRunRecoveryForTask(currentTaskId) &&
-            needsPrep
-        ) {
-            scheduleNoClassificationRecoveryFromAutopilot(
-                currentTaskId,
-                classState,
-                "ลาก region + Valid"
-            );
+        if (needsPrep && currentTaskId && autoSkipNoClassificationEnabled) {
+            const nowPrep = Date.now();
+            if (noClassificationTaskId !== currentTaskId) {
+                noClassificationTaskId = currentTaskId;
+                noClassificationStartedAt = nowPrep;
+            }
+            const prepWaited = nowPrep - noClassificationStartedAt;
+            const prepDelayMs = getWaveformRecoveryDelayMs(classState);
+
+            if (
+                !isProcessing &&
+                !postCancelSkipKickInFlight &&
+                !activeRecoveryTaskId &&
+                canRunRecoveryForTask(currentTaskId)
+            ) {
+                if (
+                    prepWaited >= prepDelayMs ||
+                    prepWaited >= stuckTaskTimeoutMs
+                ) {
+                    if (
+                        scheduleNoClassificationRecoveryFromAutopilot(
+                            currentTaskId,
+                            classState,
+                            "ลาก region + Valid"
+                        )
+                    ) {
+                        return;
+                    }
+                }
+            }
+
+            if (prepWaited >= stuckTaskTimeoutMs && !isProcessing) {
+                console.warn(
+                    `[DingTag] task ${currentTaskId} ค้างไม่มี Classification เกิน ${(stuckTaskTimeoutMs / 1000).toFixed(1)} วิ → Shift+↓`
+                );
+                setStatus(`task ${currentTaskId} ไม่มี Classification → Shift+↓`);
+                isProcessing = true;
+                (async () => {
+                    try {
+                        await fallbackSkipNoClassification(currentTaskId);
+                    } finally {
+                        noClassificationTaskId = "";
+                        noClassificationStartedAt = 0;
+                        isProcessing = false;
+                    }
+                })();
+                return;
+            }
+
+            if (nowPrep - lastNoTargetLogAt > 2000) {
+                lastNoTargetLogAt = nowPrep;
+                setStatus(
+                    `task ${currentTaskId}: ${getClassificationWaitStatusLabel(classState, {
+                        waitedMs: prepWaited,
+                        maxWaitMs: prepDelayMs,
+                    })}...`
+                );
+            }
             return;
         }
 
@@ -6822,8 +6888,14 @@ setInterval(() => {
                 ) {
                     setStatus(`task ${idleTaskId} ส่ง Update แล้ว — รอ task ใหม่`);
                 } else if (needsPrePipelineAnnotationSteps()) {
+                    const prepWaited = noClassificationStartedAt
+                        ? now - noClassificationStartedAt
+                        : 0;
                     setStatus(
-                        `task ${idleTaskId}: ${getClassificationWaitStatusLabel(classState)}...`
+                        `task ${idleTaskId}: ${getClassificationWaitStatusLabel(classState, {
+                            waitedMs: prepWaited,
+                            maxWaitMs: getWaveformRecoveryDelayMs(classState),
+                        })}...`
                     );
                 } else {
                     setStatus(`task ${idleTaskId}: รอเงื่อนไข pipeline · ${getNoTargetFilterStatusHint()}`);
