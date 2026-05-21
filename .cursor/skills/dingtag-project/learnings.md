@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — Was skipped ไม่มีปุ่ม Update → Cancel skip ก่อน
+
+- **Symptom:** งาน skip มาแล้ว รัน pipeline จบแต่ไม่มี Update — bot กด Shift+↓ งานไม่ถูกส่งจริง
+- **Root cause:** Label Studio แสดง `Was skipped` + `Cancel skip` แทน `Update` จนกว่าจะยกเลิก skip
+- **Fix:** `isTaskWasSkipped` + `ensureCancelSkipIfWasSkipped` — เรียกต้น `runTranscriptionPipeline`, `runNoClassificationRecoveryFlow`, และก่อนลูป `clickUpdateWithEnabledCheck`
+- **Verify:** ยังไม่ทด — reload ext 1.8.0, เปิด task ที่ขึ้น Was skipped, ดู log `Cancel skip` แล้ว pipeline กด Update ได้
+- **Reuse:** DOM `.lsf-controls__skipped-info`, `button[aria-label="cancel-skip"]`
+- **Tags:** skip, update, lsf-controls
+
 ## 2026-05-21 — Region ช่องว่างซ้าย–ขวา (pad 3px)
 
 - **Symptom:** region เขียวเหลือช่องเล็กๆ ที่ 0.000 และปลายขวา — ตรงกับ `left+3` / `right-3`

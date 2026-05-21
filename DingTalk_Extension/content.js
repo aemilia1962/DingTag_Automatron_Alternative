@@ -2979,6 +2979,12 @@ async function runNoClassificationRecoveryFlow(currentTaskId) {
         await delay(READ_DELAY_MS);
         if (!isRunActive(runToken)) return;
 
+        const csRes = await ensureCancelSkipIfWasSkipped({ runToken });
+        if (csRes.reason === "stale") return;
+        if (!csRes.ok && csRes.reason !== "not_skipped") {
+            console.warn("[DingTag] recovery: Cancel skip ไม่สำเร็จ —", csRes.reason);
+        }
+
         setStatus(`task ${pipelineTaskId}: ซูมออก + ลาก region + verify...`);
         const regionRes = await createFullWaveformRegionWithVerify(runToken, { maxAttempts: 3 });
         if (!regionRes.ok) {
@@ -3624,6 +3630,75 @@ async function nudgeUnlockUpdate({ runToken } = {}) {
     return nudged;
 }
 
+/** งานที่เคย Shift+↓ skip ไว้ — แสดง "Was skipped" + ปุ่ม Cancel skip แทน Update */
+function isTaskWasSkipped() {
+    const info = document.querySelector(".lsf-controls__skipped-info");
+    if (info) {
+        const text = (info.innerText || info.textContent || "").trim().toLowerCase();
+        if (text.includes("was skipped") || text.includes("skipped")) return true;
+    }
+    const controls = document.querySelector(".lsf-controls");
+    if (controls) {
+        const t = (controls.innerText || controls.textContent || "").trim().toLowerCase();
+        if (t.includes("was skipped")) return true;
+    }
+    return false;
+}
+
+function findCancelSkipButton() {
+    const byAria = document.querySelector('button[aria-label="cancel-skip"]');
+    if (byAria) return byAria;
+    const controls = document.querySelector(".lsf-controls");
+    const scope = controls || document;
+    const buttons = scope.querySelectorAll("button");
+    for (const btn of buttons) {
+        const text = (btn.innerText || btn.textContent || "").trim().toLowerCase();
+        if (text === "cancel skip" || text.includes("cancel skip")) return btn;
+    }
+    return null;
+}
+
+/**
+ * ถ้า task อยู่สถานะ Was skipped → กด Cancel skip เพื่อให้กลับมาแก้/กด Update ได้
+ */
+async function ensureCancelSkipIfWasSkipped({ runToken } = {}) {
+    if (!isTaskWasSkipped() && !findCancelSkipButton()) {
+        return { ok: true, reason: "not_skipped" };
+    }
+    const btn = findCancelSkipButton();
+    if (!btn) {
+        console.warn("[DingTag] Was skipped แต่ไม่เจอปุ่ม Cancel skip");
+        return { ok: false, reason: "cancel_skip_not_found" };
+    }
+    if (runToken != null && !isRunActive(runToken)) {
+        return { ok: false, reason: "stale" };
+    }
+    console.log("[DingTag] task Was skipped — กด Cancel skip ก่อน flow ปกติ");
+    setStatus("Was skipped → กด Cancel skip...");
+    const rcRes = await robustClick(btn, {
+        tries: 3,
+        intervalMs: 220,
+        runToken,
+        logLabel: "Cancel skip",
+    });
+    if (rcRes.reason === "stale") return { ok: false, reason: "stale" };
+    if (!rcRes.ok) {
+        console.warn("[DingTag] Cancel skip ไม่สำเร็จ:", rcRes.reason);
+        return { ok: false, reason: rcRes.reason || "click_failed" };
+    }
+    await delay(650);
+    if (runToken != null && !isRunActive(runToken)) {
+        return { ok: false, reason: "stale" };
+    }
+    const upd = findSubmitUpdateButton();
+    console.log(
+        upd
+            ? "✅ Cancel skip แล้ว — เจอปุ่ม Update"
+            : "✅ Cancel skip แล้ว — ยังไม่เจอ Update (อาจต้องทำ annotation ก่อน)"
+    );
+    return { ok: true, reason: "cancel_skip_clicked" };
+}
+
 function findSubmitUpdateButton() {
     const candidates = document.querySelectorAll(
         'button[name="submit"][aria-label="submit"]'
@@ -3677,9 +3752,19 @@ async function clickUpdateWithEnabledCheck({
     pressEscBeforeClick = false,
     escBeforeClickDelayMs = 200,
 } = {}) {
+    let cancelSkipTried = false;
     for (let i = 1; i <= maxTries; i++) {
         if (runToken != null && !isRunActive(runToken)) {
             return { ok: false, reason: "stale" };
+        }
+
+        if (!cancelSkipTried && (isTaskWasSkipped() || findCancelSkipButton())) {
+            cancelSkipTried = true;
+            const csRes = await ensureCancelSkipIfWasSkipped({ runToken });
+            if (csRes.reason === "stale") return { ok: false, reason: "stale" };
+            if (csRes.reason === "cancel_skip_clicked") {
+                continue;
+            }
         }
 
         if (!skipBlurBeforeCheck && blurActiveTextInput()) {
@@ -5665,6 +5750,12 @@ async function runTranscriptionPipeline(
         forceTranscribeFromInvalid = false,
     } = {}
 ) {
+    const csRes = await ensureCancelSkipIfWasSkipped({ runToken });
+    if (csRes.reason === "stale") return;
+    if (!csRes.ok && csRes.reason !== "not_skipped") {
+        console.warn("[DingTag] pipeline: Cancel skip ไม่สำเร็จ —", csRes.reason);
+    }
+
     if (!skipInitialClassificationClick) {
         await delay(READ_DELAY_MS);
         if (!isRunActive(runToken)) return;

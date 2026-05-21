@@ -31,7 +31,9 @@ Port `54321`. CORS: `scale.dingtalk.com`.
 | `postPhysicalClick` | 687 | `/api/physical_click` |
 | `runTranscriptionPipeline` | ~5400 | Main auto pipeline |
 | `runInvalidToVerifiedFlow` | ~3900 | Invalid / no-recheck |
-| `runNoClassificationRecoveryFlow` | ~2880 | ไม่มี Classification: ซูม→ลาก→Valid→pipeline |
+| `runNoClassificationRecoveryFlow` | ~2968 | ไม่มี Classification: ซูม→ลาก→Valid→pipeline |
+| `ensureCancelSkipIfWasSkipped` | ~3655 | Was skipped → กด Cancel skip ก่อน pipeline/Update |
+| `isTaskWasSkipped` / `findCancelSkipButton` | ~3627 | `.lsf-controls__skipped-info` · `button[aria-label=cancel-skip]` |
 | `processedTaskIds` | 34 | Duplicate guard |
 
 ### Waveform / region (no Classification recovery)

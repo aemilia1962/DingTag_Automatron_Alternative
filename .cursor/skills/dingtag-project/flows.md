@@ -10,8 +10,27 @@
 
 | Flow | เมื่อไหร่ | Entry ในโค้ด |
 |------|----------|----------------|
+| [Was skipped → Cancel skip](#precheck-was-skipped) | งานเคย Shift+↓ skip — ไม่มีปุ่ม Update | `ensureCancelSkipIfWasSkipped` |
 | [Waveform region + Valid](#flow-waveform-region--valid) | ไม่มี Classification ใน sidebar | `runNoClassificationRecoveryFlow` |
 | *(เพิ่ม flow ใหม่ด้านล่าง)* | | |
+
+---
+
+## Precheck: Was skipped
+
+**เมื่อไหร่:** `.lsf-controls` แสดง `Was skipped` + ปุ่ม `Cancel skip` (`aria-label="cancel-skip"`) แทน `Update`
+
+**ทำก่อน:** pipeline ปกติ / waveform recovery / กด Update (ใน `clickUpdateWithEnabledCheck`)
+
+```mermaid
+flowchart LR
+    S{Was skipped?} -->|ไม่| N[flow ปกติ]
+    S -->|ใช่| C[ensureCancelSkipIfWasSkipped]
+    C --> N
+```
+
+- ไม่กด Cancel skip → จบ pipeline แล้วไม่เจอ Update → bot อาจ Shift+↓ ซ้ำ งานไม่ถูกอัปเดตจริง
+- หลัง Cancel skip → UI กลับโหมด annotation → มี Update เมื่อทำครบ
 
 ---
 

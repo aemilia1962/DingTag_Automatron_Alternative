@@ -15,6 +15,15 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — Was skipped → กด Cancel skip ก่อน pipeline/Update
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** `ensureCancelSkipIfWasSkipped` เมื่อเจอ Was skipped; ext 1.8.0
+- **Files:** `DingTalk_Extension/content.js`, `manifest.json`, `flows.md`, `reference.md`, `learnings.md`
+- **Tags:** skip, update, extension
+
 ## 2026-05-21 — แยก Flow ไป flows.md (ไม่ใส่ยาวใน SKILL)
 
 - **Status:** done
