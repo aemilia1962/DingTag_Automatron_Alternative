@@ -20,6 +20,14 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — ค้างที่ "ส่ง Shift+↓" หลัง Cancel skip
+
+- **Symptom:** status ค้าง `ส่ง Shift+↓ ไป task ถัดไปแล้ว`; Console `ReferenceError: taskId is not defined` ที่ `kickPostCancelSkipHandling` finally
+- **Root cause:** `let taskId` อยู่ใน `try` แต่ `finally` อ้าง `taskId` → throw กลาง finally → `postCancelSkipKickInFlight` ค้าง true, recovery ไม่รันต่อ
+- **Fix:** ประกาศ `taskId` ก่อน `try`; รอ DOM ~900ms ก่อน kick; delay 700ms หลัง Cancel skip; `void kick(...).catch()`; ext 1.8.10
+- **Verify:** ยังไม่ทด — task skipped เช่น 11383171
+- **Tags:** cancel_skip, ReferenceError, finally, stuck
+
 ## 2026-05-21 — Cancel skip แล้ว waveform เล่น 2–3 รอบ แต่ไม่ลาก region
 
 - **Symptom:** หลัง Cancel skip เห็นเสียง/playback วิ่งหลายรอบ ไม่เห็นช่วงเขียว; log ซ้อน `waveform recovery` / `จบ recovery` คู่; บาง task `canvas_highlight_partial`

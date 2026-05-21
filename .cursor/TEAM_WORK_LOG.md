@@ -15,6 +15,15 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — แก้ค้างหลัง Cancel skip (taskId ReferenceError)
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** `taskId` ย้ายออกนอก `try` (finally ไม่ throw); รอ DOM 900ms+700ms หลัง Cancel skip; `.catch` บน kick; ext **1.8.10**
+- **Files:** `content.js`, `manifest.json`, `learnings.md`
+- **Tags:** cancel_skip, ReferenceError, stuck_status
+
 ## 2026-05-21 — Cancel skip: เสียงเล่นซ้ำ / ไม่ลาก region
 
 - **Status:** done

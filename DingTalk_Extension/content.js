@@ -3229,10 +3229,14 @@ function clickClassificationFocus() {
 async function kickPostCancelSkipHandling(seedTaskId = "") {
     if (postCancelSkipKickInFlight || activeRecoveryTaskId) return;
     if (isProcessing && activeRecoveryTaskId) return;
+
+    let taskId = String(seedTaskId || "").trim();
     postCancelSkipKickInFlight = true;
 
     try {
-        let taskId = String(seedTaskId || "").trim();
+        setStatus("Was skipped → รอ DOM หลัง Cancel skip...");
+        await delay(900);
+
         for (let i = 0; i < 30 && !taskId; i++) {
             await delay(200);
             taskId = getCurrentTaskId();
@@ -3243,8 +3247,6 @@ async function kickPostCancelSkipHandling(seedTaskId = "") {
             return;
         }
         if (!canRunRecoveryForTask(taskId)) return;
-        if (postCancelSkipKickTaskId === taskId) return;
-        postCancelSkipKickTaskId = taskId;
 
         console.log(`[DingTag] post-cancel: Cancel skip → ลาก region (task ${taskId})`);
         isProcessing = true;
@@ -3252,17 +3254,19 @@ async function kickPostCancelSkipHandling(seedTaskId = "") {
         const csRes = await ensureCancelSkipIfWasSkipped({ runToken: null });
         if (csRes.reason === "stale") return;
         pauseWaveformMedia();
+        await delay(700);
         setStatus(`หลัง Cancel skip: รอ waveform...`);
         await waitForWaveformAnnotatable(14000);
         pauseWaveformMedia();
         setStatus(`หลัง Cancel skip: ลาก region + Valid...`);
         await runNoClassificationRecoveryFlow(taskId);
     } catch (e) {
-        console.warn("[DingTag] post-cancel kick error:", e?.name, e?.message);
+        console.warn("[DingTag] post-cancel kick error:", e?.name, e?.message, e);
         setStatus("post-cancel error (ดู Console)");
     } finally {
         lastRecoveryEndedAt = Date.now();
-        lastRecoveryEndedTaskId = taskId || lastRecoveryEndedTaskId;
+        if (taskId) lastRecoveryEndedTaskId = taskId;
+        postCancelSkipKickTaskId = "";
         postCancelSkipKickInFlight = false;
         isProcessing = false;
         activeRunToken = 0;
@@ -6596,8 +6600,12 @@ setInterval(() => {
         if (skippedUi && !postCancelSkipKickInFlight && !activeRecoveryTaskId) {
             const tid = getCurrentTaskId();
             if (tid) {
-                setStatus("Was skipped → bot กด Cancel skip...");
-                kickPostCancelSkipHandling(tid);
+                void kickPostCancelSkipHandling(tid).catch((e) => {
+                    console.warn("[DingTag] kick post-cancel unhandled:", e?.name, e?.message);
+                    postCancelSkipKickInFlight = false;
+                    isProcessing = false;
+                    if (isAutoPilotOn) setStatus("post-cancel error — ลองใหม่");
+                });
             }
             return;
         }
