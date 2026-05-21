@@ -44,6 +44,8 @@ let postCancelSkipKickInFlight = false;
 let lastRecoveryEndedAt = 0;
 let lastRecoveryEndedTaskId = "";
 const RECOVERY_REPEAT_COOLDOWN_MS = 10000;
+/** กัน recovery ซ้อน (สาเหตุเสียงเล่นซ้ำ / ลากไม่ทัน DOM) */
+let activeRecoveryTaskId = "";
 // ตรวจจับเมื่อ task เด้งกลับบนสุด (bounce detection)
 let lastNavigatedTaskId = "";
 let bounceSkipInProgress = false;
@@ -478,7 +480,42 @@ function safeSetTextarea(runToken, ta, value, label = "textbox") {
     return true;
 }
 
+/** หยุดเสียงเล่นอัตโนมัติหลัง Cancel skip / ก่อนลาก region */
+function pauseWaveformMedia() {
+    const root = findLsfAudioTag();
+    const scope = root || document;
+    let paused = 0;
+    for (const el of scope.querySelectorAll("audio, video")) {
+        try {
+            el.pause();
+            if (el.currentTime > 0.05) el.currentTime = 0;
+            paused++;
+        } catch {}
+    }
+    if (paused) console.log(`[DingTag] pause waveform media (${paused})`);
+    return paused;
+}
+
+/** รอ canvas พร้อมหลังโหลด task (ไม่เล่นเสียงซ้ำ) */
+async function waitForWaveformAnnotatable(timeoutMs = 14000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        pauseWaveformMedia();
+        const canvas = findWaveformCanvas();
+        if (canvas) {
+            const r = canvas.getBoundingClientRect();
+            if (r.width >= 200 && r.height >= 40 && canvas.width >= 50) {
+                await delay(400);
+                return true;
+            }
+        }
+        await delay(250);
+    }
+    return !!findWaveformCanvas();
+}
+
 async function fetchAudioAsBase64() {
+    pauseWaveformMedia();
     const mediaEl = document.querySelector("audio, video");
     if (!mediaEl || !mediaEl.src) {
         console.warn("[DingTag] ดูดเสียง: ไม่พบ <audio> หรือ <video> ที่มี src");
@@ -2178,9 +2215,6 @@ function hasAdequateExistingWaveformRegion() {
     if (verify.ok) {
         return { ok: true, reason: verify.reason, metrics: { verify, canvasBar, domBar } };
     }
-    if (canvasStrong || domStrong) {
-        return { ok: true, reason: "strong_highlight", metrics: { verify, canvasBar, domBar } };
-    }
     return { ok: false, reason: "no_region", metrics: { verify, canvasBar, domBar } };
 }
 
@@ -2797,10 +2831,7 @@ function estimateRegionWidthRatioFromCanvas() {
             const ref = ctx.getImageData(2, y, 1, 1).data;
             for (let x = 0; x < w; x++) {
                 const px = ctx.getImageData(x, y, 1, 1).data;
-                if (
-                    isSelectionPx(px[0], px[1], px[2], px[3]) ||
-                    !isBg(px[0], px[1], px[2], px[3], ref)
-                ) {
+                if (isSelectionPx(px[0], px[1], px[2], px[3])) {
                     left = Math.min(left, x);
                     right = Math.max(right, x);
                     activeCols++;
@@ -2908,11 +2939,13 @@ function verifyWaveformRegionCoverage({
 
 /** ซูมออก → ลาก → verify; ไม่ผ่านจะ retry */
 async function createFullWaveformRegionWithVerify(runToken, { maxAttempts = 3 } = {}) {
+    pauseWaveformMedia();
     let lastVerify = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         if (!isRunActive(runToken)) {
             return { ok: false, reason: "stale", attempt, verify: lastVerify };
         }
+        pauseWaveformMedia();
 
         const zoomRes = await zoomWaveformOutToFit({
             maxSteps: attempt === 1 ? 32 : 18,
@@ -3031,6 +3064,7 @@ function dispatchDragOnElement(el, x0, y0, x1, y1, steps = 12) {
  * - ยิง event บน scroller เป็นหลัก (LSF ผูก timeline กับ scroll + spacer)
  */
 async function dragWaveformFull({ edgePx = 0, steps = 22 } = {}) {
+    pauseWaveformMedia();
     const canvas = findWaveformCanvas();
     if (!canvas) {
         console.warn("[DingTag] dragWaveformFull: ไม่พบ waveform canvas");
@@ -3193,7 +3227,8 @@ function clickClassificationFocus() {
  * หลัง Cancel skip (มักกดเอง) — รอ DOM แล้วเข้า pipeline/recovery (ไม่ค้าง status รอ target)
  */
 async function kickPostCancelSkipHandling(seedTaskId = "") {
-    if (postCancelSkipKickInFlight || isProcessing) return;
+    if (postCancelSkipKickInFlight || activeRecoveryTaskId) return;
+    if (isProcessing && activeRecoveryTaskId) return;
     postCancelSkipKickInFlight = true;
 
     try {
@@ -3211,9 +3246,16 @@ async function kickPostCancelSkipHandling(seedTaskId = "") {
         if (postCancelSkipKickTaskId === taskId) return;
         postCancelSkipKickTaskId = taskId;
 
-        console.log(`[DingTag] post-cancel: ลาก region + Valid (task ${taskId})`);
-        setStatus(`หลัง Cancel skip: ลาก region + Valid...`);
+        console.log(`[DingTag] post-cancel: Cancel skip → ลาก region (task ${taskId})`);
         isProcessing = true;
+        setStatus("Was skipped → กด Cancel skip...");
+        const csRes = await ensureCancelSkipIfWasSkipped({ runToken: null });
+        if (csRes.reason === "stale") return;
+        pauseWaveformMedia();
+        setStatus(`หลัง Cancel skip: รอ waveform...`);
+        await waitForWaveformAnnotatable(14000);
+        pauseWaveformMedia();
+        setStatus(`หลัง Cancel skip: ลาก region + Valid...`);
         await runNoClassificationRecoveryFlow(taskId);
     } catch (e) {
         console.warn("[DingTag] post-cancel kick error:", e?.name, e?.message);
@@ -3231,7 +3273,9 @@ async function kickPostCancelSkipHandling(seedTaskId = "") {
 
 /** เริ่ม waveform recovery จาก autopilot (กันเรียกซ้อนเมื่อ isProcessing) */
 function scheduleNoClassificationRecoveryFromAutopilot(currentTaskId, classState, triggerLabel) {
-    if (!currentTaskId || isProcessing) return false;
+    if (!currentTaskId || isProcessing || activeRecoveryTaskId || postCancelSkipKickInFlight) {
+        return false;
+    }
     if (!canRunRecoveryForTask(currentTaskId)) return false;
     if (
         currentTaskId === lastRecoveryEndedTaskId &&
@@ -3260,6 +3304,7 @@ function scheduleNoClassificationRecoveryFromAutopilot(currentTaskId, classState
         } catch (e) {
             console.warn("[DingTag] waveform recovery error:", e?.name, e?.message);
         } finally {
+            if (activeRecoveryTaskId === currentTaskId) activeRecoveryTaskId = "";
             lastRecoveryEndedAt = Date.now();
             lastRecoveryEndedTaskId = currentTaskId;
             await delay(1500);
@@ -3289,6 +3334,14 @@ async function fallbackSkipNoClassification(taskId) {
  */
 async function runNoClassificationRecoveryFlow(currentTaskId) {
     const pipelineTaskId = currentTaskId;
+    if (activeRecoveryTaskId && activeRecoveryTaskId !== pipelineTaskId) {
+        console.warn(
+            `[DingTag] recovery ซ้อน: ข้าม task ${pipelineTaskId} (กำลังทำ ${activeRecoveryTaskId})`
+        );
+        return;
+    }
+    activeRecoveryTaskId = pipelineTaskId;
+
     const runToken = ++runTokenCounter;
     activeRunToken = runToken;
     const cycleStartAt = Date.now();
@@ -3297,6 +3350,11 @@ async function runNoClassificationRecoveryFlow(currentTaskId) {
     noClassificationStartedAt = 0;
 
     try {
+        pauseWaveformMedia();
+        setStatus(`task ${pipelineTaskId}: รอ waveform พร้อมลาก...`);
+        await waitForWaveformAnnotatable(14000);
+        pauseWaveformMedia();
+
         scrollSidebarToActiveTask();
         await delay(READ_DELAY_MS);
         if (!isRunActive(runToken)) return;
@@ -3318,38 +3376,6 @@ async function runNoClassificationRecoveryFlow(currentTaskId) {
                 forceTranscribeFromInvalid: sidebarReady.classificationValue === "invalid",
             });
             return;
-        }
-
-        const existingRegion = hasAdequateExistingWaveformRegion();
-        if (existingRegion.ok) {
-            console.log(
-                `[DingTag] recovery: เห็น region (${existingRegion.reason}) — ลองกด Valid ก่อน`
-            );
-            setStatus("recovery: กด Valid (มี region แล้ว)...");
-            const validRes = clickWaveformValidLabel();
-            if (!validRes.ok) {
-                setStatus(`กด Valid ไม่สำเร็จ → ลาก region`);
-            } else {
-                await delay(600);
-                if (!isRunActive(runToken)) return;
-                const scanned = await waitForClassificationTarget(5000);
-                if (scanned) {
-                    console.log(
-                        `[DingTag] recovery: Valid สำเร็จ — sidebar ${scanned.classificationValue}`
-                    );
-                    await runTranscriptionPipeline(runToken, cycleStartAt, pipelineTaskId, {
-                        classificationValue: scanned.classificationValue,
-                        skipInitialClassificationClick: false,
-                        forceTranscribeFromInvalid: scanned.classificationValue === "invalid",
-                    });
-                    return;
-                }
-                console.warn(
-                    "[DingTag] recovery: กด Valid แล้วแต่ sidebar ยังว่าง — ไม่มี region จริง, ลากใหม่",
-                    existingRegion.metrics
-                );
-                setStatus("ไม่มี region จริง — ลากใหม่...");
-            }
         }
 
         setStatus(`task ${pipelineTaskId}: ลาก region + กด Valid...`);
@@ -3400,6 +3426,8 @@ async function runNoClassificationRecoveryFlow(currentTaskId) {
         console.error("[DingTag] no-classification recovery:", e);
         setStatus("recovery error → Shift+↓");
         await fallbackSkipNoClassification(pipelineTaskId);
+    } finally {
+        if (activeRecoveryTaskId === pipelineTaskId) activeRecoveryTaskId = "";
     }
 }
 
@@ -4056,7 +4084,8 @@ async function ensureCancelSkipIfWasSkipped({ runToken } = {}) {
         return { ok: false, reason: rcRes.reason || "click_failed" };
     }
     markPostCancelSkipWindow("bot_cancel_skip");
-    await delay(400);
+    pauseWaveformMedia();
+    await delay(500);
     if (runToken != null && !isRunActive(runToken)) {
         return { ok: false, reason: "stale" };
     }
@@ -6564,28 +6593,19 @@ setInterval(() => {
 
         const needsPrep = needsPrePipelineAnnotationSteps();
 
-        if (skippedUi && !isProcessing && !postCancelSkipKickInFlight) {
-            setStatus("Was skipped → bot กด Cancel skip...");
-            isProcessing = true;
-            (async () => {
-                try {
-                    const csRes = await ensureCancelSkipIfWasSkipped({ runToken: null });
-                    if (csRes.reason === "stale") return;
-                    const tid = getCurrentTaskId();
-                    if (tid && needsPrePipelineAnnotationSteps()) {
-                        await kickPostCancelSkipHandling(tid);
-                    } else if (tid) {
-                        markPostCancelSkipWindow("auto_cancel_skip");
-                    }
-                } catch (e) {
-                    console.warn("[DingTag] auto Cancel skip:", e?.name, e?.message);
-                } finally {
-                    isProcessing = false;
-                }
-            })();
+        if (skippedUi && !postCancelSkipKickInFlight && !activeRecoveryTaskId) {
+            const tid = getCurrentTaskId();
+            if (tid) {
+                setStatus("Was skipped → bot กด Cancel skip...");
+                kickPostCancelSkipHandling(tid);
+            }
             return;
-        } else if (
+        }
+
+        if (
             !isProcessing &&
+            !postCancelSkipKickInFlight &&
+            !activeRecoveryTaskId &&
             currentTaskId &&
             canRunRecoveryForTask(currentTaskId) &&
             needsPrep
@@ -6595,13 +6615,6 @@ setInterval(() => {
                 classState,
                 "ลาก region + Valid"
             );
-            return;
-        } else if (
-            postCancelSkipUntil > Date.now() &&
-            needsPrep &&
-            !postCancelSkipKickInFlight
-        ) {
-            kickPostCancelSkipHandling(currentTaskId);
             return;
         }
 

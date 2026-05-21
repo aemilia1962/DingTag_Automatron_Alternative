@@ -15,6 +15,16 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — Cancel skip: เสียงเล่นซ้ำ / ไม่ลาก region
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** `pauseWaveformMedia` + `waitForWaveformAnnotatable`; mutex `activeRecoveryTaskId`; กด Cancel skip ก่อนรอ waveform; ลบ path "มี region แล้ว" ใน recovery; canvas scan เฉพาะสีเขียว; autopilot skipped → `kick` อย่างเดียว; ext **1.8.9**
+- **Files:** `DingTalk_Extension/content.js`, `manifest.json`, `learnings.md`
+- **Do not redo:** อย่าเปิด recovery 3 ทางพร้อมกัน (auto cancel + schedule + postCancel window)
+- **Tags:** cancel_skip, waveform, region, playback, recovery
+
 ## 2026-05-21 — แก้ค้างหลัง Cancel skip (manual) + status รอ target
 
 - **Status:** done

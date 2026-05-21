@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — Cancel skip แล้ว waveform เล่น 2–3 รอบ แต่ไม่ลาก region
+
+- **Symptom:** หลัง Cancel skip เห็นเสียง/playback วิ่งหลายรอบ ไม่เห็นช่วงเขียว; log ซ้อน `waveform recovery` / `จบ recovery` คู่; บาง task `canvas_highlight_partial`
+- **Root cause:** recovery เรียกซ้อน (skippedUi + schedule + postCancel); เสียงเล่นระหว่างโหลด; `estimateRegionWidthRatioFromCanvas` นับ waveform เทาเป็น highlight → ข้ามลาก; กด Cancel skip ช้า (รอ waveform 14s ก่อนคลิก)
+- **Fix:** `pauseWaveformMedia` ก่อนลาก/ดูดเสียง; `activeRecoveryTaskId` mutex; `kickPostCancelSkipHandling` กด Cancel skip ก่อน `waitForWaveformAnnotatable`; recovery ลากเสมอ (ไม่ใช้ valid-only โดยไม่มี sidebar); canvas scan ใช้ `isSelectionPx` เท่านั้น (ext 1.8.9)
+- **Verify:** ยังไม่ทด — task skipped เช่น 11383137 / 11383166
+- **Reuse:** ถ้าเห็น playback ซ้ำ → grep `activeRecoveryTaskId` + `pauseWaveformMedia`
+- **Tags:** cancel_skip, playback, region, recovery_mutex
+
 ## 2026-05-21 — Loop "มี region แล้ว" แต่ No annotation items
 
 - **Symptom:** log ซ้ำ `recovery: มี region แล้ว — กด Valid` ทั้งที่ waveform ไม่มีช่วงเขียว / sidebar No annotation items
