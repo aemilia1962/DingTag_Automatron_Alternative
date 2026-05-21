@@ -88,14 +88,8 @@ scale.dingtalk.com → content.js → 127.0.0.1:54321 → aibot_dingver.py
 ```
 
 API: `/api/transcribe` · `/api/formalize` · `/api/physical_click`  
-Pipeline หลัก: `runTranscriptionPipeline`
-
-### Waveform region (no Classification)
-
-- Flow: `runNoClassificationRecoveryFlow` → `createFullWaveformRegionWithVerify` (ซูม → scrollLeft=0 → ลาก → verify)
-- ซูมพอ: `scrollRatio ≤ 1.05` + `endGap` — **อย่า** hardcode px (867/1729)
-- ลาก: `dragWaveformFull` — X จาก **scrollRect** ±3px บน `findWaveformHorizontalScroller()`, Y กลาง canvas
-- Region: `verifyWaveformRegionCoverage` — รายละเอียดใน [learnings.md](learnings.md)
+Pipeline หลัก: `runTranscriptionPipeline`  
+**Flow การทำงาน (flowchart):** [flows.md](flows.md) — ไล่ logic ทีหลัง ไม่ใส่ยาวใน SKILL
 
 ## Workflow (ทำตามลำดับ)
 
@@ -103,7 +97,7 @@ Pipeline หลัก: `runTranscriptionPipeline`
 2. **Optimized request** — ย่อคำสั่ง (ด้านบน)
 3. **TEAM_WORK_LOG** — grep กันซ้ำ
 4. **learnings.md** — grep แนวทางเคยแก้
-5. **Locate** — grep + [reference.md](reference.md)
+5. **Locate** — grep + [reference.md](reference.md) · flow ที่เกี่ยว → [flows.md](flows.md)
 6. **Inspect** — อ่านเฉพาะช่วงที่จำเป็น
 7. **Minimal edits** — style เดิม, `runToken` guards ใน extension
 8. **Run checks** — syntax / smoke ที่เกี่ยว; ถ้ารันไม่ได้ → บอกวิธีทด manual
@@ -162,6 +156,7 @@ Pipeline หลัก: `runTranscriptionPipeline`
 
 ## Additional resources
 
+- [flows.md](flows.md) — flowchart / ขั้นตอนการทำงาน (อ่านเมื่อไล่ logic)
 - [reference.md](reference.md) — symbol map
 - [examples.md](examples.md) — ตัวอย่าง prompt + log entries
 - [TEAM_WORK_LOG.md](../../TEAM_WORK_LOG.md)

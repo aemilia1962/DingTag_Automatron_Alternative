@@ -45,7 +45,7 @@ Port `54321`. CORS: `scale.dingtalk.com`.
 | `zoomWaveformOutToFit` | 2335 | Ctrl+Wheel ลง = ซูมออก |
 | `verifyWaveformRegionCoverage` | 2552 | DOM bar / canvas scan / timeline proxy |
 | `createFullWaveformRegionWithVerify` | 2620 | ซูม→ลาก→verify, retry 3 |
-| `dragWaveformFull` | ~2790 | ลากบน scroll div; X จาก scrollRect±3px, Y กลาง canvas |
+| `dragWaveformFull` | ~2795 | ลากบน scroll div; X จาก scrollRect edgePx=0, Y กลาง canvas |
 
 DOM: `.lsf-audio-tag > div > div[overflow scroll]` · track `div[position:absolute][top:100%]` · ซูมเข้า `scrollRatio≈2`, ออก `≈1`.
 

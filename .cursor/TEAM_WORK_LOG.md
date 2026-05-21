@@ -15,6 +15,15 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — แยก Flow ไป flows.md (ไม่ใส่ยาวใน SKILL)
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** สร้าง `flows.md` เก็บ flowchart waveform+Valid; SKILL ลิงก์สั้นๆ เท่านั้น
+- **Files:** `.cursor/skills/dingtag-project/flows.md`, `SKILL.md`
+- **Tags:** docs, waveform, skill
+
 ## 2026-05-21 — แก้ ReferenceError verifyWaveformRegionCoverage
 
 - **Status:** done
