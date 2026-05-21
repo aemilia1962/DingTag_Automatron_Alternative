@@ -15,6 +15,15 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — Cancel skip: ไม่ลากทับเมื่อมี Invalid + region แล้ว
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** `waitForPostCancelSkipReady` + `hasAdequateExistingWaveformRegion`; ext 1.8.3
+- **Files:** `content.js`, `manifest.json`, `learnings.md`
+- **Tags:** cancel_skip, invalid, region
+
 ## 2026-05-21 — No region = UI ว่าง (ไม่มี Valid/Invalid)
 
 - **Status:** done

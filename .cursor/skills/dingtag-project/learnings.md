@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-21 — Cancel skip แล้วลาก region ทับ (Invalid มี region แล้ว)
+
+- **Symptom:** Was skipped → Cancel skip งาน Invalid ที่ลาก region ไว้แล้ว — bot ลากทับ + recovery กด Valid
+- **Root cause:** หลัง Cancel skip เช็ค DOM เร็วเกิน (650ms) ยังไม่เห็น Invalid ใน sidebar → เข้า recovery ลากใหม่
+- **Fix:** `hasAdequateExistingWaveformRegion` + `waitForPostCancelSkipReady` (~3.5s) — มี Invalid/region แล้วข้ามลาก; Invalid ไม่กด Valid ทับ (ext 1.8.3)
+- **Verify:** ยังไม่ทด — Cancel skip บน task Invalid+region → log `ข้ามลาก — มี Classification invalid`
+- **Reuse:** `verifyWaveformRegionCoverage({ requireZoomFit: false })` สำหรับ region เดิม
+- **Tags:** cancel_skip, invalid, region, overwrite
+
 ## 2026-05-21 — "No region" = UI ว่าง ไม่ใช่ combo
 
 - **Symptom:** หลัง Cancel skip ไม่มี Valid/Invalid / No annotation items (ไม่ใช่ข้อความ combo) — ค้างรอ target
