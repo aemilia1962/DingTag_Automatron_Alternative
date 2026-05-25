@@ -3670,6 +3670,7 @@ async function runNoClassificationRecoveryFlow(currentTaskId) {
         setStatus("recovery error → Shift+↓");
         await fallbackSkipNoClassification(pipelineTaskId);
     } finally {
+        releaseTaskClaimIfUncommitted(pipelineTaskId, "recovery_end");
         if (activeRecoveryTaskId === pipelineTaskId) activeRecoveryTaskId = "";
     }
 }
@@ -5330,6 +5331,20 @@ function markTaskCommittedAfterSuccessfulUpdate(taskId) {
     processedTaskIds.add(taskId);
     lastProcessedTaskId = taskId;
     console.log(`[DingTag] บันทึกประวัติ task ${taskId} (Update สำเร็จ)`);
+}
+
+/**
+ * ปล่อย claim ชั่วคราว (lastProcessedTaskId) เมื่อ pipeline จบโดยยังไม่ commit
+ * — กัน QC/Auto ค้าง "รอ queue" หลัง API fail / ไม่มีเสียง / return กลางทาง
+ */
+function releaseTaskClaimIfUncommitted(taskId, reason = "") {
+    if (!taskId) return false;
+    if (lastProcessedTaskId !== taskId) return false;
+    if (processedTaskIds.has(taskId)) return false;
+    lastProcessedTaskId = "";
+    const suffix = reason ? ` (${reason})` : "";
+    console.log(`[DingTag] ปล่อย claim task ${taskId} — ยังไม่ส่งงานสำเร็จ${suffix}`);
+    return true;
 }
 
 /**
@@ -7407,6 +7422,7 @@ setInterval(() => {
                     console.error("Sequence Error:", e);
                     setStatus("เกิด error (ดู Console)");
                 } finally {
+                    releaseTaskClaimIfUncommitted(pipelineTaskId, "pipeline_end");
                     await delay(1500);
                     isProcessing = false;
                     activeRunToken = 0;

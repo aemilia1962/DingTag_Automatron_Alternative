@@ -15,6 +15,16 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — ปล่อย claim เมื่อ pipeline ไม่ commit (API fail)
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** `releaseTaskClaimIfUncommitted` ใน finally หลัง `runTranscriptionPipeline` + recovery — เคลียร์ `lastProcessedTaskId` ถ้ายังไม่อยู่ใน `processedTaskIds` · ext **1.8.16**
+- **Files:** `DingTalk_Extension/content.js`, `manifest.json`
+- **Do not redo:** อย่าลบ release ใน finally — กัน QC ค้างหลัง API 500
+- **Tags:** qc-mode, claim, api-fail
+
 ## 2026-05-25 — Re-check Invalid: เคลียร์ Invalid Reason ก่อนสลับ Valid
 
 - **Status:** done

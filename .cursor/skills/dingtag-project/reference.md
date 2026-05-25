@@ -43,6 +43,7 @@ Port `54321`. CORS: `scale.dingtalk.com`.
 | `clickQcSubmitWithEnabledCheck` | ~4255 | ส่งงาน QC (delegate จาก `clickUpdateWithEnabledCheck`) |
 | `findQcAllTasksButton` / `isQcAllTasksButtonPresent` | ~6318 | ปุ่ม QC All Tasks (Data Manager) |
 | `runQcAllTasksRecovery` | ~6340 | QC idle recovery แทน Auto-Filter |
+| `releaseTaskClaimIfUncommitted` | ~5335 | ปล่อย lastProcessedTaskId เมื่อ pipeline ไม่ commit |
 | `clearCheckedInvalidReasons` | ~1895 | Re-check: เคลียร์ Invalid Reason ก่อนสลับ Valid |
 | `findInvalidReasonSectionRoot` | ~1805 | หา section Invalid Reason (Required) |
 | `uncheckAntCheckboxByNameAndVerify` | ~1855 | ยกเลิกติ๊ก checkbox ตาม name |

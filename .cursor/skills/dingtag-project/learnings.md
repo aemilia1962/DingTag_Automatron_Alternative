@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — QC ค้างหลัง API 500 (claim ไม่ปล่อย)
+
+- **Symptom:** transcribe 500 แล้ว bot ไม่ retry — สถานะ `QC: task X ส่งแล้ว — รอ queue`
+- **Root cause:** Autopilot ตั้ง `lastProcessedTaskId` ก่อน pipeline แต่ `markTaskCommitted` เฉพาะตอนส่งงานสำเร็จ
+- **Fix:** `releaseTaskClaimIfUncommitted` ใน `finally` หลัง pipeline/recovery
+- **Verify:** ยังไม่ทด — reload ext 1.8.16
+- **Reuse:** grep `releaseTaskClaimIfUncommitted`
+- **Tags:** qc-mode, claim, api-fail
+
 ## 2026-05-25 — Invalid Reason ติดเมื่อ Re-check เป็น Valid
 
 - **Symptom:** Classification เป็น Valid แต่ Invalid Reason ยังแสดง Data Missing (หรือ reason อื่นที่ติ๊กค้างจากรอบ Invalid)
