@@ -15,6 +15,16 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — QC: ข้าม Review radios + QC All Tasks fallback
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** Valid path QC ไม่กด Optimized/Verified · Invalid No Recheck QC ข้าม Optimized ยังกด Has Errors · `runQcAllTasksRecovery` กดปุ่ม QC All Tasks บน Data Manager (idle 4s, cooldown 30s) · ext **1.8.13**
+- **Files:** `DingTalk_Extension/content.js`, `manifest.json`, `flows.md`, `reference.md`, `learnings.md`
+- **Do not redo:** อย่าใส่ Optimized/Verified กลับเข้า QC Valid โดยไม่ขอ user
+- **Tags:** qc-mode, review-result, qc-all-tasks, data-manager
+
 ## 2026-05-25 — จด flow โหมด QC ใน flows.md (การบ้าน)
 
 - **Status:** done
