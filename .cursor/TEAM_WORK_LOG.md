@@ -15,6 +15,15 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — fix ReferenceError pipelineTaskId ใน finally (1.8.17)
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** ย้าย `const pipelineTaskId` ออกนอก try — `releaseTaskClaimIfUncommitted` ใน finally เข้าถึงได้ · ext **1.8.17**
+- **Files:** `content.js`, `manifest.json`
+- **Tags:** bugfix, qc-mode
+
 ## 2026-05-25 — ปล่อย claim เมื่อ pipeline ไม่ commit (API fail)
 
 - **Status:** done

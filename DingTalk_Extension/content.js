@@ -7407,11 +7407,11 @@ setInterval(() => {
             scrollSidebarToActiveTask();
 
             (async () => {
+                const pipelineTaskId = currentTaskId;
                 try {
                     const runToken = ++runTokenCounter;
                     activeRunToken = runToken;
                     const cycleStartAt = Date.now();
-                    const pipelineTaskId = currentTaskId;
 
                     await runTranscriptionPipeline(runToken, cycleStartAt, pipelineTaskId, {
                         classificationValue,

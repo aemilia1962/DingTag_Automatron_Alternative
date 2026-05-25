@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DingTalk Auto-Pilot",
-  "version": "1.8.16",
+  "version": "1.8.17",
   "description": "Auto / QC / Manual modes. QC: pipeline without Review radios (Optimized/Verified), QC All Tasks fallback on Data Manager, submits via Update/Accept/Fix+Accept, no Shift navigation. Auto: Shift+\u2191 filter, duplicate-loop handling. After submit, dismisses Quality Check Failed via Ignore & Submit. Created by IQ.Automatron",
   "host_permissions": [
     "http://127.0.0.1:54321/*",
