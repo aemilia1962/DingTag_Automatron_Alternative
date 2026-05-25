@@ -4992,9 +4992,10 @@ async function switchClassificationInvalidToValid(runToken) {
 
 /**
  * เจอ Classification = Invalid แบบไม่สลับเป็น Valid: Esc → Optimized → Has Errors → เช็ค Task ID → Update
+ * โหมด QC: ข้าม Review Result (Optimized / Has Errors) → ส่งงานตรง
  * เรียกจาก autopilot เมื่อเปิดสวิตช์ "No Recheck Invalid" (dingtag_no_recheck_invalid)
  *
- * ขั้นตอน:
+ * ขั้นตอน (Auto):
  *  1) ส่ง Escape เพื่อปิด popup/dropdown ที่อาจค้างอยู่
  *  2) คลิก radio "Optimized" — รอ 1 วิ
  *  3) คลิก radio "Has Errors"
@@ -5006,8 +5007,8 @@ async function switchClassificationInvalidToValid(runToken) {
  */
 async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId = "") {
     if (isQcMode()) {
-        console.log("🚩 Invalid (No Recheck, QC): Esc → Has Errors → ส่งงาน");
-        setStatus("QC: Invalid (No Recheck) — Has Errors");
+        console.log("🚩 Invalid (No Recheck, QC): ข้าม Review Result → ส่งงาน");
+        setStatus("QC: Invalid (No Recheck) — ข้าม Review → ส่งงาน");
     } else {
         console.log("🚩 Invalid (No Recheck): Esc → Optimized → Has Errors → Update");
         setStatus("Invalid (No Recheck) — Optimized → Has Errors");
@@ -5016,7 +5017,7 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId =
     if (dispatchEscape()) {
         console.log(
             isQcMode()
-                ? "⎋ Invalid flow (QC): ส่ง Escape ก่อนคลิก Has Errors"
+                ? "⎋ Invalid flow (QC): ส่ง Escape ก่อนส่งงาน"
                 : "⎋ Invalid flow: ส่ง Escape ก่อนคลิก Optimized"
         );
     }
@@ -5035,32 +5036,27 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId =
             await delay(1000);
             if (!isRunActive(runToken)) return;
         }
-    } else {
-        console.log("⏭️ Invalid flow (QC): ข้าม Optimized — กด Has Errors");
-    }
 
-    // กด Has Errors
-    const errRes = await clickHasErrorsRadio({ tries: 8, intervalMs: 400, runToken });
-    if (errRes.reason === "stale") return;
-    if (!errRes.ok) {
-        console.warn("⚠️ Invalid flow: ไม่พบ radio Has Errors");
-        setStatus(
-            isQcMode()
-                ? "QC: ไม่พบ Has Errors — รอ queue"
-                : "Invalid: ไม่พบ Has Errors → ไป task ถัดไป"
-        );
-        await delay(500);
-        if (!isRunActive(runToken)) return;
-        if (!isQcMode() && (await goToNextTask({ runToken }))) {
-            setStatus("Invalid: ส่ง Shift+↓ ไป task ถัดไปแล้ว (ไม่พบ Has Errors)");
-            await delay(600);
+        const errRes = await clickHasErrorsRadio({ tries: 8, intervalMs: 400, runToken });
+        if (errRes.reason === "stale") return;
+        if (!errRes.ok) {
+            console.warn("⚠️ Invalid flow: ไม่พบ radio Has Errors");
+            setStatus("Invalid: ไม่พบ Has Errors → ไป task ถัดไป");
+            await delay(500);
+            if (!isRunActive(runToken)) return;
+            if (await goToNextTask({ runToken })) {
+                setStatus("Invalid: ส่ง Shift+↓ ไป task ถัดไปแล้ว (ไม่พบ Has Errors)");
+                await delay(600);
+            }
+            return;
         }
-        return;
-    }
-    setStatus("Invalid → คลิก Has Errors แล้ว");
+        setStatus("Invalid → คลิก Has Errors แล้ว");
 
-    await delay(700);
-    if (!isRunActive(runToken)) return;
+        await delay(700);
+        if (!isRunActive(runToken)) return;
+    } else {
+        console.log("⏭️ Invalid flow (QC): ข้าม Optimized และ Has Errors");
+    }
 
     if (cycleStartAt != null) {
         await ensureMinElapsedBeforeAccept(runToken, cycleStartAt);
@@ -5068,16 +5064,27 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId =
     }
 
     if (blurAnyActiveElement()) {
-        console.log("👀 Invalid flow: blur active element ก่อนกด Update");
+        console.log(
+            isQcMode()
+                ? "👀 Invalid flow (QC): blur ก่อนส่งงาน"
+                : "👀 Invalid flow: blur active element ก่อนกด Update"
+        );
     }
     if (dispatchEscape()) {
-        console.log("⎋ Invalid flow: ส่ง Escape ก่อนกด Update");
+        console.log(
+            isQcMode()
+                ? "⎋ Invalid flow (QC): ส่ง Escape ก่อนส่งงาน"
+                : "⎋ Invalid flow: ส่ง Escape ก่อนกด Update"
+        );
     }
     await delay(300);
     if (!isRunActive(runToken)) return;
 
     if (expectedTaskId) {
-        const tchk = verifyExpectedTaskIdBeforeUpdate(expectedTaskId, "Invalid Optimized→Has Errors flow");
+        const tchk = verifyExpectedTaskIdBeforeUpdate(
+            expectedTaskId,
+            isQcMode() ? "Invalid (No Recheck) QC flow" : "Invalid Optimized→Has Errors flow"
+        );
         if (!tchk.ok) {
             setStatus("Invalid flow: Task เปลี่ยนก่อน Update — ข้าม");
             return;
@@ -6557,10 +6564,17 @@ async function runTranscriptionPipeline(
 
     if (classificationValue === "invalid") {
         if (noRecheckInvalidEnabled && !forceTranscribeFromInvalid) {
-            console.log(
-                "⚡ Classification = Invalid — No Recheck: Optimized → Has Errors → เช็ค Task ID → Update"
-            );
-            setStatus("Invalid (No Recheck): Optimized → Has Errors…");
+            if (isQcMode()) {
+                console.log(
+                    "⚡ Classification = Invalid — No Recheck (QC): ข้าม Review → ส่งงาน"
+                );
+                setStatus("QC: Invalid (No Recheck) — ส่งงาน…");
+            } else {
+                console.log(
+                    "⚡ Classification = Invalid — No Recheck: Optimized → Has Errors → เช็ค Task ID → Update"
+                );
+                setStatus("Invalid (No Recheck): Optimized → Has Errors…");
+            }
             await runInvalidToVerifiedFlow(runToken, cycleStartAt, pipelineTaskId);
             return;
         }

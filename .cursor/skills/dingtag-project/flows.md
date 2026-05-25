@@ -269,7 +269,7 @@ Poll เดียวกับ Auto (~6817) แต่ตัด navigation:
 
 Invalid branches ใช้ `clickUpdateWithEnabledCheck` เหมือนกัน → ใน QC ไป `clickQcSubmitWithEnabledCheck` · ท้าย flow **ไม่** `goToNextTask` · log ประมาณ `QC: Invalid flow ส่งงานแล้ว — รอ queue`
 
-**Invalid (No Recheck) ใน QC:** ข้าม Optimized · ยังกด **Has Errors** แล้วส่งงาน
+**Invalid (No Recheck) ใน QC:** ข้าม Review Result ทั้งหมด (Optimized / Has Errors) แล้วส่งงานตรง
 
 ### Data Manager fallback (QC All Tasks)
 

@@ -20,7 +20,7 @@
 - **Status:** done
 - **Author:** team
 - **Git:** not pushed
-- **Summary:** Valid path QC ไม่กด Optimized/Verified · Invalid No Recheck QC ข้าม Optimized ยังกด Has Errors · `runQcAllTasksRecovery` กดปุ่ม QC All Tasks บน Data Manager (idle 4s, cooldown 30s) · ext **1.8.13**
+- **Summary:** Valid path QC ไม่กด Optimized/Verified · Invalid No Recheck QC ข้าม Review ทั้งหมด (ไม่กด Has Errors) · `runQcAllTasksRecovery` กดปุ่ม QC All Tasks บน Data Manager (idle 4s, cooldown 30s) · ext **1.8.13**
 - **Files:** `DingTalk_Extension/content.js`, `manifest.json`, `flows.md`, `reference.md`, `learnings.md`
 - **Do not redo:** อย่าใส่ Optimized/Verified กลับเข้า QC Valid โดยไม่ขอ user
 - **Tags:** qc-mode, review-result, qc-all-tasks, data-manager
