@@ -2,7 +2,7 @@
 
 ไฟล์นี้เก็บ **flowchart + ขั้นตอน** สำหรับไล่ logic ทีหลัง — ไม่ใส่ใน `SKILL.md` (SKILL เน้น workflow ของ Agent)
 
-**อัปเดต:** เมื่อเพิ่ม/เปลี่ยน flow ในโค้ด → แก้ไฟล์นี้ + บรรทัดสัญลักษณ์ใน [reference.md](reference.md) ถ้าจำเป็น
+**อัปเดต:** 2026-05-25 — เพิ่ม [โหมด QC (รายละเอียด)](#โหมด-qc-รายละเอียด) · เมื่อเพิ่ม/เปลี่ยน flow ในโค้ด → แก้ไฟล์นี้ + บรรทัดสัญลักษณ์ใน [reference.md](reference.md) ถ้าจำเป็น
 
 ---
 
@@ -16,6 +16,7 @@
 | [Waveform region + Valid](#flow-waveform-region--valid) | ไม่มี Classification ใน sidebar | `runNoClassificationRecoveryFlow` |
 | [Pipeline หลัก (Valid)](#pipeline-หลัก-valid) | มี Classification ใน sidebar | `runTranscriptionPipeline` |
 | [Invalid / QC branches](#invalid--qc-branches) | API หรือ QC ส่ง invalid | `runInvalid*Flow` |
+| **[โหมด QC (รายละเอียด)](#โหมด-qc-รายละเอียด)** | Autopilot QC — ไม่ Shift, รอ queue | `isQcMode` · `clickQcSubmitWithEnabledCheck` |
 | [Auto-Filter recovery](#auto-filter-recovery) | ไม่เจอ target นาน | `runAutoFilterRecovery` |
 
 ---
@@ -161,7 +162,7 @@ flowchart LR
 | **Manual** | ถอดเสียง / formalize เอง |
 | **Kill Switch** | ยกเลิก `runToken`, เคลียร์ `processedTaskIds` |
 
-### Flow: โหมด QC
+### Flow: โหมด QC (สรุปสั้น)
 
 ```mermaid
 flowchart LR
@@ -174,6 +175,103 @@ flowchart LR
 - `localStorage`: `dingtag_extension_mode` = `qc`
 - ปุ่มส่งงาน: `findQcSubmitCandidate` — ลำดับ Update → Fix+Accept → Accept
 - หลังส่งสำเร็จ: ไม่เรียก `goToNextTask` / `goToPreviousTask`
+
+---
+
+## โหมด QC (รายละเอียด)
+
+**สรุป:** QC = pipeline เดียวกับ Auto (`runTranscriptionPipeline`) แต่ส่งงานแบบ QC และ **ไม่เลื่อน task เอง** — รอ queue ของ DingTalk ส่ง task ถัดไป (`taskId` เปลี่ยน)
+
+**Entry ในโค้ด:** `content.js` — `isQcMode` · `isAutoLikeMode` · `shouldUseShiftNavigation` · `clickQcSubmitWithEnabledCheck` · `findQcSubmitCandidate` · Autopilot `setInterval` ~6817
+
+### QC ต่างจาก Auto
+
+| หัวข้อ | Auto | QC |
+|--------|------|-----|
+| Autopilot loop | `isAutoLikeMode` | เหมือนกัน (`auto` หรือ `qc`) |
+| Pipeline | `runTranscriptionPipeline` | **เหมือนกัน** |
+| ส่งงาน | ปุ่ม **Update** | **Update → Fix+Accept → Accept** (อันแรกที่กดได้) |
+| เลื่อน task | Shift+↓ / Shift+↑ | **ไม่ใช้** — รอ queue |
+| Auto-Filter recovery | มี | **ไม่มี** (`extensionMode === "auto"` เท่านั้น) |
+| Task ส่งแล้ว / ค้าง / ไม่มี Classification นาน | Shift+↑/↓, duplicate-loop | **รอ queue** อย่างเดียว |
+| UI overlay | แสดง Filter settings | **ซ่อน** Filter block · title "DingTalk QC" |
+
+```101:117:e:\Downloads\vsc\DingTag_Automatron_Alternative\DingTalk_Extension\content.js
+/** โหมด extension: auto = pipeline เดิม | qc = Auto + ส่ง Update/Accept/Fix+Accept รอ queue | manual = ถอดเสียงมือ */
+function isQcMode() { return extensionMode === "qc"; }
+function isAutoLikeMode() { return extensionMode === "auto" || extensionMode === "qc"; }
+function shouldUseShiftNavigation() { return extensionMode === "auto"; }
+```
+
+### Flow หลัก (ภาพรวม)
+
+```mermaid
+flowchart TD
+    ON[Autopilot ON + โหมด QC] --> POLL[setInterval ~500ms]
+    POLL --> PRE{Was skipped / ไม่มี Classification?}
+    PRE -->|ใช่| REC[Waveform recovery เหมือน Auto]
+    PRE -->|มี Classification| DUP{task ส่งแล้ว?<br/>processedTaskIds}
+    DUP -->|ใช่| WAIT[รอ queue — ไม่ Shift]
+    DUP -->|ยัง| PIPE[runTranscriptionPipeline]
+
+    subgraph PIPE["Pipeline QC"]
+        P1[ensureCancelSkipIfWasSkipped]
+        P1 --> P2[คลิก Classification]
+        P2 --> P3[POST /api/transcribe]
+        P3 --> QCAPI{QC จาก API}
+        QCAPI -->|fail| INV[runInvalid*Flow]
+        QCAPI -->|ผ่าน| FILL[ใส่ข้อความ + formalize]
+        FILL --> RAD[Optimized + Verified]
+        RAD --> SUB[clickQcSubmitWithEnabledCheck]
+        SUB --> POP[Ignore & Submit popup]
+        POP --> WAIT2[รอ 2s — ไม่ Shift+↓]
+    end
+
+    INV --> SUB2[ส่งงาน QC]
+    SUB2 --> WAIT2
+    REC --> PIPE
+    WAIT2 --> WAIT
+    WAIT --> POLL
+```
+
+### ขั้นตอน Pipeline (Valid path)
+
+| ลำดับ | ทำอะไร |
+|------|--------|
+| 0 | `ensureCancelSkipIfWasSkipped` ถ้า Was skipped |
+| 1 | คลิก Classification ใน sidebar (Invalid → สลับ Valid หรือ invalid flow) |
+| 2 | `fetchAudioAsBase64` → `POST /api/transcribe` |
+| 3 | QC จาก API ไม่ผ่าน → `runInvalidDataMissingAcceptFlow` / `runInvalidNonTargetLanguageAcceptFlow` / `runInvalidReasonAcceptFlow` / `runInvalidToVerifiedFlow` |
+| 4 | ผ่าน → ใส่ transcript → `POST /api/formalize` |
+| 5 | Optimized → Verified |
+| 6 | `clickQcSubmitWithEnabledCheck` (เรียกจาก `clickUpdateWithEnabledCheck` เมื่อ `isQcMode()`) |
+| 7 | Popup **Ignore & Submit** ถ้ามี Quality Check Failed |
+| 8 | รอ 2s · **ไม่** `goToNextTask` · สถานะ `QC: รอ queue ส่ง task ใหม่` |
+
+**ลำดับปุ่มส่งงาน** (`findQcSubmitCandidate`): Update → Fix+Accept (`aria-label="accept-annotation"` + ข้อความมี fix+accept) → Accept
+
+### Autopilot loop — พฤติกรรมเฉพาะ QC
+
+Poll เดียวกับ Auto (~6817) แต่ตัด navigation:
+
+| สถานการณ์ | Auto | QC |
+|-----------|------|-----|
+| ส่งงานสำเร็จ (`processedTaskIds`) | Shift+↑ / duplicate-loop break | `setStatus` รอ queue · `return` |
+| ไม่มี Classification เกิน `stuckTaskTimeoutMs` | `fallbackSkipNoClassification` Shift+↓ | รอ queue |
+| Task ค้างหลัง claim | บังคับ Shift+↓ | รอ queue |
+| ไม่เจอ target นาน | `runAutoFilterRecovery` | ไม่รัน |
+
+`goToNextTask` / `goToPreviousTask` เรียก `shouldUseShiftNavigation()` — QC จะ log `[DingTag QC] ข้าม Shift+↓/↑ — รอ queue ส่ง task ใหม่` แล้ว `return false`
+
+### Invalid flows ใน QC
+
+Invalid branches ใช้ `clickUpdateWithEnabledCheck` เหมือนกัน → ใน QC ไป `clickQcSubmitWithEnabledCheck` · ท้าย flow **ไม่** `goToNextTask` · log ประมาณ `QC: Invalid flow ส่งงานแล้ว — รอ queue`
+
+### Grep หา entry QC
+
+```bash
+rg "isQcMode|clickQcSubmitWithEnabledCheck|findQcSubmitCandidate|shouldUseShiftNavigation" DingTalk_Extension/content.js
+```
 
 ---
 

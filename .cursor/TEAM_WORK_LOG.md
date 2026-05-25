@@ -15,6 +15,16 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — จด flow โหมด QC ใน flows.md (การบ้าน)
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** ขยาย `flows.md` ส่วน **โหมด QC (รายละเอียด)** — ตารางเทียบ Auto, mermaid ภาพรวม, ขั้น pipeline, autopilot รอ queue, invalid branches, grep entry · อ้างอิงคำตอบ user รอบอธิบาย flow QC
+- **Files:** `.cursor/skills/dingtag-project/flows.md`
+- **Do not redo:** อย่าลบสารบัญลิงก์ `#โหมด-qc-รายละเอียด` โดยไม่ย้ายเนื้อหา
+- **Tags:** docs, qc-mode, flowchart
+
 ## 2026-05-25 — โหมด QC ใน extension (Update / Accept / Fix+Accept)
 
 - **Status:** done
