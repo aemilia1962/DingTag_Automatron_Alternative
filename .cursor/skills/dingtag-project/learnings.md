@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — Invalid Reason ติดเมื่อ Re-check เป็น Valid
+
+- **Symptom:** Classification เป็น Valid แต่ Invalid Reason ยังแสดง Data Missing (หรือ reason อื่นที่ติ๊กค้างจากรอบ Invalid)
+- **Root cause:** `switchClassificationInvalidToValid` ไม่ได้ยกเลิก checkbox ใน section Invalid Reason ก่อนสลับ
+- **Fix:** `clearCheckedInvalidReasons` + `uncheckAntCheckboxByNameAndVerify` — หา checkbox ใน section หรือ fallback `INVALID_REASON_CHECKBOX_NAMES` · เรียกเฉพาะเมื่อ `!noRecheckInvalidEnabled` ก่อนสลับ Valid
+- **Verify:** ยังไม่ทด — reload ext 1.8.15
+- **Reuse:** grep `clearCheckedInvalidReasons` ก่อนเพิ่มขั้นก่อน Re-check
+- **Tags:** invalid-reason, recheck, ant-checkbox
+
 ## 2026-05-25 — QC: ไม่กด Review radios + Data Manager ใช้ QC All Tasks
 
 - **Symptom:** หน้า QC review ไม่ต้องกด Optimized/Verified; ถ้าหลุด Data Manager ต้องกลับ queue โดยไม่ใช้ Filter 6 ขั้น

@@ -2,7 +2,7 @@
 
 ไฟล์นี้เก็บ **flowchart + ขั้นตอน** สำหรับไล่ logic ทีหลัง — ไม่ใส่ใน `SKILL.md` (SKILL เน้น workflow ของ Agent)
 
-**อัปเดต:** 2026-05-25 — QC ข้าม Review Result · fallback QC All Tasks (Data Manager) · ext 1.8.13 · เมื่อเพิ่ม/เปลี่ยน flow ในโค้ด → แก้ไฟล์นี้ + [reference.md](reference.md)
+**อัปเดต:** 2026-05-25 — Re-check เคลียร์ Invalid Reason ก่อน Valid · QC ข้าม Review · ext 1.8.15 · เมื่อเพิ่ม/เปลี่ยน flow → แก้ไฟล์นี้ + [reference.md](reference.md)
 
 ---
 
@@ -353,7 +353,8 @@ flowchart TD
     START[ensureCancelSkipIfWasSkipped] --> CLS[คลิก Classification ใน sidebar]
     CLS --> INVCHK{invalid?}
     INVCHK -->|No Recheck| INVP[runInvalidToVerifiedFlow → จบ]
-    INVCHK -->|invalid| SW[switch → Valid]
+    INVCHK -->|invalid Re-check| CLR[clearCheckedInvalidReasons]
+    CLR --> SW[switch → Valid]
     SW --> TA
     INVCHK -->|valid| TA[โฟกัส Annotation Result]
     TA --> API[POST /api/transcribe]
@@ -380,8 +381,21 @@ flowchart TD
 
 เรียกจาก `runTranscriptionPipeline` เมื่อ QC/API ไม่ผ่าน หรือ Classification = Invalid
 
+### Re-check Invalid → Valid (No Recheck ปิด)
+
+ลำดับเมื่อ task เข้ามาเป็น **Invalid** แต่ต้องการถอดเสียงใหม่:
+
+1. `clearCheckedInvalidReasons` — ยกเลิกติ๊ก Invalid Reason ที่ค้าง (เช่น Data Missing) **ก่อน** สลับ Valid
+2. `switchClassificationInvalidToValid`
+3. ถอดเสียง + QC → ผ่าน = Valid path · ไม่ผ่าน = `runInvalid*Flow` ติ๊ก reason ใหม่
+
+ถ้าไม่เคลียร์ checkbox ก่อน สลับ Valid แล้ว Invalid Reason จะติดใน submission
+
+**ไม่รันเคลียร์** เมื่อ No Recheck เปิด (`runInvalidToVerifiedFlow` แทน)
+
 | ฟังก์ชัน | เมื่อไหร่ |
 |----------|----------|
+| `clearCheckedInvalidReasons` | Invalid + No Recheck **ปิด** — ก่อน `switchClassificationInvalidToValid` |
 | `runInvalidToVerifiedFlow` | Invalid + toggle No Recheck |
 | `runInvalidDataMissingAcceptFlow` | เงียบเกิน / เสียงแย่ / sensitive |
 | `runInvalidNonTargetLanguageAcceptFlow` | non-target language |

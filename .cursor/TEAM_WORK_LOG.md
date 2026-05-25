@@ -15,6 +15,16 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — Re-check Invalid: เคลียร์ Invalid Reason ก่อนสลับ Valid
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** path Re-check (No Recheck ปิด) เรียก `clearCheckedInvalidReasons` ก่อน `switchClassificationInvalidToValid` — ป้องกัน Data Missing ฯลฯ ติดเมื่อ Classification เป็น Valid · ext **1.8.15**
+- **Files:** `DingTalk_Extension/content.js`, `manifest.json`, `flows.md`, `reference.md`, `learnings.md`
+- **Do not redo:** อย่าเคลียร์ reason เมื่อ No Recheck เปิด (user เลือกขอบเขต recheck_only)
+- **Tags:** invalid-reason, recheck, no-recheck-invalid
+
 ## 2026-05-25 — QC: ข้าม Review radios + QC All Tasks fallback
 
 - **Status:** done

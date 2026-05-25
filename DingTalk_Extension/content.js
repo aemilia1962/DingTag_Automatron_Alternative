@@ -1795,6 +1795,165 @@ function findAntCheckboxByName(checkboxName) {
     );
 }
 
+/** ชื่อ checkbox ใน UI Invalid Reason (Required) — ใช้ fallback เมื่อหา section ไม่เจอ */
+const INVALID_REASON_CHECKBOX_NAMES = [
+    "Excessive Noise",
+    "No Voice Detected",
+    "Speaker Unintelligible",
+    "Sentence Cut-off",
+    "Data Missing",
+    "Non-Target Language",
+    "Noise or Silence at the Beginning or End Exceeds 1 Second",
+];
+
+function findInvalidReasonSectionRoot() {
+    const headingCandidates = document.querySelectorAll(
+        "h3, h4, .typography-title-large--fyTQU, [class*='typography-title']"
+    );
+    for (const h of headingCandidates) {
+        const t = (h.textContent || "").replace(/\s+/g, " ").trim();
+        if (!/invalid\s*reason/i.test(t)) continue;
+        let node = h.parentElement;
+        for (let depth = 0; depth < 6 && node; depth++) {
+            if (
+                node.querySelector(
+                    'input.ant-checkbox-input[type="checkbox"][name]'
+                )
+            ) {
+                return node;
+            }
+            node = node.parentElement;
+        }
+        return h.parentElement;
+    }
+    return null;
+}
+
+function getCheckedInvalidReasonCheckboxes() {
+    const root = findInvalidReasonSectionRoot();
+    if (root) {
+        const inSection = [
+            ...root.querySelectorAll(
+                'input.ant-checkbox-input[type="checkbox"]:checked'
+            ),
+        ];
+        if (inSection.length) return inSection;
+    }
+    const fallback = [];
+    for (const name of INVALID_REASON_CHECKBOX_NAMES) {
+        const cb = findAntCheckboxByName(name);
+        if (cb && cb.checked) fallback.push(cb);
+    }
+    return fallback;
+}
+
+function getAntCheckboxClickTarget(input) {
+    if (!input) return null;
+    return (
+        input.closest("label") ||
+        input.closest(".ant-checkbox-wrapper") ||
+        input.closest(".ant-checkbox") ||
+        input
+    );
+}
+
+async function uncheckAntCheckboxByNameAndVerify(
+    checkboxName,
+    { tries = 8, intervalMs = 300, logLabel = "checkbox", runToken } = {}
+) {
+    for (let i = 1; i <= tries; i++) {
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale" };
+        }
+        if (!isAutoPilotOn) return { ok: false, reason: "autopilot_off" };
+        const cb = findAntCheckboxByName(checkboxName);
+        if (!cb) {
+            await delay(intervalMs);
+            continue;
+        }
+        if (!cb.checked) return { ok: true, reason: "already_unchecked" };
+        const clickTarget = getAntCheckboxClickTarget(cb);
+        try {
+            clickTarget.scrollIntoView?.({ block: "center", inline: "center" });
+        } catch {}
+        try {
+            console.log(`[DingTag] uncheck ${logLabel} ${i}/${tries}`);
+            clickTarget.click();
+        } catch (e) {
+            console.warn("[DingTag] uncheck checkbox error:", e?.name, e?.message);
+            try {
+                cb.click();
+            } catch {}
+        }
+        await delay(120);
+        const cb2 = findAntCheckboxByName(checkboxName);
+        if (cb2 && !cb2.checked) return { ok: true, reason: "unchecked" };
+        await delay(intervalMs);
+    }
+    return { ok: false, reason: "still_checked" };
+}
+
+/**
+ * Re-check path: ยกเลิกติ๊ก Invalid Reason ที่ค้างจากรอบ Invalid ก่อนสลับเป็น Valid
+ */
+async function clearCheckedInvalidReasons({ runToken } = {}) {
+    const checked = getCheckedInvalidReasonCheckboxes();
+    if (!checked.length) {
+        console.log("[DingTag] Invalid Reason: ไม่มี checkbox ที่ติ๊กอยู่ — ข้ามเคลียร์");
+        return { ok: true, count: 0, names: [] };
+    }
+
+    const names = [
+        ...new Set(
+            checked.map((cb) => (cb.getAttribute("name") || "").trim()).filter(Boolean)
+        ),
+    ];
+    console.log(
+        `[DingTag] Invalid Reason: เคลียร์ ${names.length} รายการก่อน Re-check → Valid:`,
+        names.join(", ")
+    );
+    setStatus(`เคลียร์ Invalid Reason (${names.length})…`);
+
+    let cleared = 0;
+    const failed = [];
+    for (const name of names) {
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale", count: cleared, names, failed };
+        }
+        const res = await uncheckAntCheckboxByNameAndVerify(name, {
+            logLabel: name,
+            runToken,
+        });
+        if (res.reason === "stale") {
+            return { ok: false, reason: "stale", count: cleared, names, failed };
+        }
+        if (res.ok) {
+            cleared++;
+        } else {
+            failed.push(name);
+            console.warn(`⚠️ Invalid Reason: เคลียร์ "${name}" ไม่สำเร็จ (${res.reason})`);
+        }
+        await delay(150);
+    }
+
+    const remaining = getCheckedInvalidReasonCheckboxes().length;
+    if (remaining > 0) {
+        console.warn(
+            `[DingTag] Invalid Reason: ยังติ๊กค้าง ${remaining} รายการหลังเคลียร์`
+        );
+    } else if (cleared > 0) {
+        console.log(`✅ Invalid Reason: เคลียร์ครบ ${cleared} รายการ`);
+    }
+
+    return {
+        ok: failed.length === 0,
+        count: cleared,
+        names,
+        failed,
+        remaining,
+    };
+}
+
 /**
  * Physical click (Python pyautogui) ที่ checkbox + verify ว่า state เปลี่ยนแล้ว
  * - คลิกที่ <label> หรือ .ant-checkbox parent (ไม่ใช่ input ที่ซ่อนอยู่) เพื่อให้พิกัดมองเห็นจริง
@@ -6579,8 +6738,20 @@ async function runTranscriptionPipeline(
             return;
         }
         console.log(
-            "⚡ Classification = Invalid → สลับเป็น Valid แล้วรัน pipeline (คัดกรองด้วย API)"
+            "⚡ Classification = Invalid → เคลียร์ Invalid Reason → สลับเป็น Valid แล้วรัน pipeline (คัดกรองด้วย API)"
         );
+        if (!noRecheckInvalidEnabled) {
+            setStatus("Invalid → เคลียร์ Invalid Reason ก่อน Re-check...");
+            const clearRes = await clearCheckedInvalidReasons({ runToken });
+            if (clearRes.reason === "stale") return;
+            if (clearRes.count > 0) {
+                console.log(
+                    `[DingTag] Re-check: เคลียร์ Invalid Reason ${clearRes.count} รายการ`
+                );
+            }
+            await delay(300);
+            if (!isRunActive(runToken)) return;
+        }
         setStatus("Invalid → Valid แล้วถอดเสียง...");
         await switchClassificationInvalidToValid(runToken);
         await delay(450);
