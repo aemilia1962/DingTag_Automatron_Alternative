@@ -37,6 +37,10 @@ Port `54321`. CORS: `scale.dingtalk.com`.
 | `ensureCancelSkipIfWasSkipped` | ~3720 | Was skipped → Cancel skip; no_region → recovery |
 | `isTaskWasSkipped` / `findCancelSkipButton` | ~3627 | `.lsf-controls__skipped-info` · `button[aria-label=cancel-skip]` |
 | `processedTaskIds` | 34 | Duplicate guard |
+| `isQcMode` / `isAutoLikeMode` / `shouldUseShiftNavigation` | ~102 | โหมด QC vs Auto |
+| `findAcceptAnnotationButton` | ~4225 | `button[aria-label=accept-annotation]` + ข้อความ span |
+| `findQcSubmitCandidate` | ~4240 | Update → Fix+Accept → Accept |
+| `clickQcSubmitWithEnabledCheck` | ~4255 | ส่งงาน QC (delegate จาก `clickUpdateWithEnabledCheck`) |
 
 ### Waveform / region (no Classification recovery)
 
@@ -54,6 +58,8 @@ Port `54321`. CORS: `scale.dingtalk.com`.
 DOM: `.lsf-audio-tag > div > div[overflow scroll]` · track `div[position:absolute][top:100%]` · ซูมเข้า `scrollRatio≈2`, ออก `≈1`.
 
 `localStorage` (recovery): `dingtag_auto_skip_no_classification`, `dingtag_no_classification_timeout_ms` · prefix `dingtag_` (grep)
+
+`localStorage` (mode): `dingtag_extension_mode` = `auto` | `qc` | `manual`
 
 ## Grep cheatsheet
 

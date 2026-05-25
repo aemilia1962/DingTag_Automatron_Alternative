@@ -15,6 +15,16 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — โหมด QC ใน extension (Update / Accept / Fix+Accept)
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** ปุ่มโหมด QC คู่ Auto/Manual · pipeline เหมือน Auto · ปิด Filter + Shift · ส่งงานผ่าน `clickQcSubmitWithEnabledCheck` · รอ queue เปลี่ยน task · ext **1.8.12**
+- **Files:** `DingTalk_Extension/content.js`, `manifest.json`, `flows.md`, `reference.md`, `learnings.md`
+- **Do not redo:** อย่าใส่ Shift+↓/Filter กลับเข้า QC โดยไม่ขอ user
+- **Tags:** qc-mode, accept-annotation, extensionMode
+
 ## 2026-05-21 — แก้ค้างสถานะ "ลาก region + กด Valid" ไม่เริ่ม recovery
 
 - **Status:** done

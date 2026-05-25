@@ -98,8 +98,23 @@ let orderBySortDescendingClicks = Math.min(
     Math.max(1, parseInt(localStorage.getItem("dingtag_order_by_sort_desc_clicks") || "1", 10) || 1)
 );
 
-/** โหมด extension: auto = pipeline เดิม | manual = ถอดเสียงมือ + วางข้อความเอง */
-let extensionMode = localStorage.getItem("dingtag_extension_mode") === "manual" ? "manual" : "auto";
+/** โหมด extension: auto = pipeline เดิม | qc = Auto + ส่ง Update/Accept/Fix+Accept รอ queue | manual = ถอดเสียงมือ */
+function normalizeExtensionMode(raw) {
+    const v = String(raw || "").trim().toLowerCase();
+    if (v === "manual" || v === "qc") return v;
+    return "auto";
+}
+let extensionMode = normalizeExtensionMode(localStorage.getItem("dingtag_extension_mode"));
+
+function isQcMode() {
+    return extensionMode === "qc";
+}
+function isAutoLikeMode() {
+    return extensionMode === "auto" || extensionMode === "qc";
+}
+function shouldUseShiftNavigation() {
+    return extensionMode === "auto";
+}
 
 /** Manual เท่านั้น: โมเดลจัดคำ — id ต้องตรง whitelist ใน aibot_dingver (MANUAL_FORMAL_OVERRIDE_MODELS) */
 const MANUAL_FORMAL_MODEL_OPTIONS = [
@@ -860,7 +875,19 @@ modeManualBtn.style.cursor = "pointer";
 modeManualBtn.style.fontSize = "12px";
 modeManualBtn.style.fontWeight = "bold";
 
+const modeQcBtn = document.createElement("button");
+modeQcBtn.type = "button";
+modeQcBtn.innerText = "QC";
+modeQcBtn.style.flex = "1";
+modeQcBtn.style.padding = "6px";
+modeQcBtn.style.border = "none";
+modeQcBtn.style.borderRadius = "6px";
+modeQcBtn.style.cursor = "pointer";
+modeQcBtn.style.fontSize = "11px";
+modeQcBtn.style.fontWeight = "bold";
+
 modeSwitchRow.appendChild(modeAutoBtn);
+modeSwitchRow.appendChild(modeQcBtn);
 modeSwitchRow.appendChild(modeManualBtn);
 panel.appendChild(modeSwitchRow);
 
@@ -1117,6 +1144,9 @@ orderBySortRow.appendChild(orderBySortLabelWrap);
 orderBySortRow.appendChild(orderBySortSwitch);
 
 // ---- ตั้งค่า Auto-Filter (Annotators / Does not contain / <user>) — hotkey Shift+↑ ----
+const filterSettingsBlock = document.createElement("div");
+settingsContainer.appendChild(filterSettingsBlock);
+
 // Toggle: เปิด/ปิด ฟีเจอร์ทั้งหมด
 const filterToggleRow = document.createElement("div");
 filterToggleRow.style.display = "flex";
@@ -1124,7 +1154,7 @@ filterToggleRow.style.alignItems = "center";
 filterToggleRow.style.justifyContent = "space-between";
 filterToggleRow.style.gap = "8px";
 filterToggleRow.style.marginTop = "12px";
-settingsContainer.appendChild(filterToggleRow);
+filterSettingsBlock.appendChild(filterToggleRow);
 
 const filterToggleLabel = document.createElement("label");
 filterToggleLabel.innerText = "🚫 Auto-Filter (Shift+↑)";
@@ -1155,7 +1185,7 @@ const filterUserLabel = document.createElement("div");
 filterUserLabel.style.fontSize = "12px";
 filterUserLabel.style.marginTop = "8px";
 filterUserLabel.innerText = "🚫 Filter exclude annotator:";
-settingsContainer.appendChild(filterUserLabel);
+filterSettingsBlock.appendChild(filterUserLabel);
 
 const filterUserInput = document.createElement("input");
 filterUserInput.type = "text";
@@ -1172,7 +1202,7 @@ filterUserInput.style.color = "#ecf0f1";
 filterUserInput.style.fontSize = "12px";
 filterUserInput.title =
     "ชื่อ user ที่จะใส่ในช่อง 'Annotators / Does not contain / <user>' เมื่อกด Shift+↑ หรือกดปุ่ม Apply ด้านล่าง";
-settingsContainer.appendChild(filterUserInput);
+filterSettingsBlock.appendChild(filterUserInput);
 
 filterUserInput.addEventListener("change", () => {
     const v = (filterUserInput.value || "").trim();
@@ -1201,7 +1231,7 @@ applyFilterBtn.addEventListener("click", () => {
         console.warn("[DingTag] Apply filter error:", e?.name, e?.message);
     });
 });
-settingsContainer.appendChild(applyFilterBtn);
+filterSettingsBlock.appendChild(applyFilterBtn);
 
 // ตรวจว่าปุ่ม Filters มีอยู่บนหน้านี้หรือไม่ (หน้า Tasks list จะมี ส่วนหน้าอื่นไม่มี)
 function isFilterButtonPresent() {
@@ -1430,15 +1460,20 @@ function updateManualHotkeyLabels() {
 }
 
 function syncModeSwitchButtons() {
+    const inactive = "#343a40";
+    const isAuto = extensionMode === "auto";
+    const isQc = extensionMode === "qc";
     const isManual = extensionMode === "manual";
-    modeAutoBtn.style.backgroundColor = isManual ? "#343a40" : "#198754";
-    modeManualBtn.style.backgroundColor = isManual ? "#0d6efd" : "#343a40";
+    modeAutoBtn.style.backgroundColor = isAuto ? "#198754" : inactive;
+    modeQcBtn.style.backgroundColor = isQc ? "#6f42c1" : inactive;
+    modeManualBtn.style.backgroundColor = isManual ? "#0d6efd" : inactive;
     modeAutoBtn.style.color = "#fff";
+    modeQcBtn.style.color = "#fff";
     modeManualBtn.style.color = "#fff";
 }
 
 function setExtensionMode(mode) {
-    const next = mode === "manual" ? "manual" : "auto";
+    const next = normalizeExtensionMode(mode);
     if (extensionMode === next) return;
     extensionMode = next;
     localStorage.setItem("dingtag_extension_mode", extensionMode);
@@ -1456,11 +1491,21 @@ function setExtensionMode(mode) {
 
 function applyExtensionModeUI() {
     const isManual = extensionMode === "manual";
+    const isQc = extensionMode === "qc";
     autoView.style.display = isManual ? "none" : "block";
     manualView.style.display = isManual ? "block" : "none";
     settingsBtn.style.display = isManual ? "none" : "flex";
-    title.innerText = isManual ? "✋ DingTalk Manual" : "🤖 DingTalk V21 (Local API)";
+    if (isManual) {
+        title.innerText = "✋ DingTalk Manual";
+    } else if (isQc) {
+        title.innerText = "🔍 DingTalk QC (Local API)";
+    } else {
+        title.innerText = "🤖 DingTalk V21 (Local API)";
+    }
     panel.style.width = isManual ? "280px" : "240px";
+    if (filterSettingsBlock) {
+        filterSettingsBlock.style.display = isQc ? "none" : "block";
+    }
     syncModeSwitchButtons();
     updateManualHotkeyLabels();
     if (isManual) {
@@ -1475,6 +1520,7 @@ function applyExtensionModeUI() {
 }
 
 modeAutoBtn.addEventListener("click", () => setExtensionMode("auto"));
+modeQcBtn.addEventListener("click", () => setExtensionMode("qc"));
 modeManualBtn.addEventListener("click", () => setExtensionMode("manual"));
 
 manualTranscribeBtn.addEventListener("click", () => {
@@ -1998,6 +2044,10 @@ function isTaskAtTopOfList() {
  */
 async function goToNextTask({ runToken } = {}) {
     if (runToken != null && !isRunActive(runToken)) return false;
+    if (!shouldUseShiftNavigation()) {
+        console.log("[DingTag QC] ข้าม Shift+↓ — รอ queue ส่ง task ใหม่");
+        return false;
+    }
     if (blurActiveTextInput()) {
         console.log("👀 blur textarea/input ก่อนส่ง Shift+ArrowDown");
     }
@@ -2049,6 +2099,10 @@ async function goToNextTask({ runToken } = {}) {
  */
 async function goToPreviousTask({ runToken } = {}) {
     if (runToken != null && !isRunActive(runToken)) return false;
+    if (!shouldUseShiftNavigation()) {
+        console.log("[DingTag QC] ข้าม Shift+↑ — รอ queue ส่ง task ใหม่");
+        return false;
+    }
     if (blurActiveTextInput()) {
         console.log("👀 blur textarea/input ก่อนส่ง Shift+ArrowUp");
     }
@@ -4174,6 +4228,121 @@ function isUpdateButtonClickable(btn) {
     return true;
 }
 
+/** QC: ปุ่ม Accept / Fix+Accept — แยกด้วยข้อความใน span (aria-label เดียวกัน) */
+function findAcceptAnnotationButton(kind) {
+    const buttons = document.querySelectorAll('button[aria-label="accept-annotation"]');
+    for (const btn of buttons) {
+        const text = (btn.innerText || btn.textContent || "").trim();
+        if (kind === "accept") {
+            if (text === "Accept") return btn;
+        } else if (kind === "fix_accept") {
+            if (/fix/i.test(text) && /accept/i.test(text)) return btn;
+        }
+    }
+    return null;
+}
+
+/** QC: ลำดับ Update → Fix+Accept → Accept (เฉพาะปุ่มที่กดได้) */
+function findQcSubmitCandidate() {
+    const upd = findSubmitUpdateButton();
+    if (isUpdateButtonClickable(upd)) return { btn: upd, kind: "update" };
+    const fixAcc = findAcceptAnnotationButton("fix_accept");
+    if (isUpdateButtonClickable(fixAcc)) return { btn: fixAcc, kind: "fix_accept" };
+    const acc = findAcceptAnnotationButton("accept");
+    if (isUpdateButtonClickable(acc)) return { btn: acc, kind: "accept" };
+    return null;
+}
+
+function qcSubmitKindLabel(kind) {
+    if (kind === "fix_accept") return "Fix+Accept";
+    if (kind === "accept") return "Accept";
+    return "Update";
+}
+
+/**
+ * QC โหมด: เช็คและกด Update / Fix+Accept / Accept (ลำดับเดียวกับ findQcSubmitCandidate)
+ */
+async function clickQcSubmitWithEnabledCheck({
+    runToken,
+    maxTries = 2,
+    retryDelayMs = 1000,
+    useNudgeOnRetry = true,
+    skipBlurBeforeCheck = false,
+    pressEscBeforeClick = false,
+    escBeforeClickDelayMs = 200,
+} = {}) {
+    let cancelSkipTried = false;
+    for (let i = 1; i <= maxTries; i++) {
+        if (runToken != null && !isRunActive(runToken)) {
+            return { ok: false, reason: "stale" };
+        }
+
+        if (!cancelSkipTried && (isTaskWasSkipped() || findCancelSkipButton())) {
+            cancelSkipTried = true;
+            const csRes = await ensureCancelSkipIfWasSkipped({ runToken });
+            if (csRes.reason === "stale") return { ok: false, reason: "stale" };
+            if (csRes.reason === "cancel_skip_clicked") {
+                continue;
+            }
+        }
+
+        if (!skipBlurBeforeCheck && blurActiveTextInput()) {
+            console.log("👀 blur textarea/input ก่อนเช็คปุ่มส่งงาน (QC)");
+        }
+
+        if (pressEscBeforeClick) {
+            if (dispatchEscape()) {
+                console.log(`⎋ ส่ง Escape ก่อนกดส่งงาน QC (ครั้งที่ ${i}/${maxTries})`);
+            }
+            if (escBeforeClickDelayMs > 0) {
+                await delay(escBeforeClickDelayMs);
+                if (runToken != null && !isRunActive(runToken)) {
+                    return { ok: false, reason: "stale" };
+                }
+            }
+        }
+
+        const candidate = findQcSubmitCandidate();
+        if (candidate) {
+            const label = qcSubmitKindLabel(candidate.kind);
+            const rcRes = await robustClick(candidate.btn, {
+                tries: 2,
+                intervalMs: 150,
+                runToken,
+                logLabel: `${label} (${i}/${maxTries})`,
+            });
+            if (rcRes.reason === "stale") {
+                return { ok: false, reason: "stale" };
+            }
+            if (rcRes.ok) {
+                return { ok: true, reason: rcRes.reason, submitKind: candidate.kind };
+            }
+            console.warn(`⚠️ robustClick ${label} ล้มเหลว (${i}/${maxTries}): ${rcRes.reason}`);
+        } else {
+            console.warn(`⚠️ QC: ไม่เจอปุ่ม Update/Accept/Fix+Accept ที่กดได้ (ครั้งที่ ${i}/${maxTries})`);
+        }
+
+        if (i < maxTries) {
+            if (useNudgeOnRetry) {
+                const nudged = await nudgeUnlockUpdate({ runToken });
+                if (runToken != null && !isRunActive(runToken)) {
+                    return { ok: false, reason: "stale" };
+                }
+                if (nudged) {
+                    console.log(`🧰 nudge unlock (QC) — รอ ${retryDelayMs}ms แล้วลองใหม่`);
+                } else {
+                    console.warn("⚠️ nudge (QC) ไม่เจอ element — ลองรอแล้วเช็คอีกครั้ง");
+                }
+            } else {
+                console.log(`⏳ ข้าม nudge (QC) — รอ ${retryDelayMs}ms แล้วลองใหม่`);
+            }
+            await delay(retryDelayMs);
+        }
+    }
+    console.warn("❌ QC: ปุ่มส่งงานยังกดไม่ได้ — ข้าม");
+    return { ok: false, reason: "disabled_after_retries" };
+}
+
 /**
  * ลำดับการทำงาน:
  * 1) เช็คปุ่ม Update — ถ้ากดได้ (ไม่ disabled) ก็กดเลย จบ
@@ -4203,6 +4372,17 @@ async function clickUpdateWithEnabledCheck({
     pressEscBeforeClick = false,
     escBeforeClickDelayMs = 200,
 } = {}) {
+    if (isQcMode()) {
+        return clickQcSubmitWithEnabledCheck({
+            runToken,
+            maxTries,
+            retryDelayMs,
+            useNudgeOnRetry,
+            skipBlurBeforeCheck,
+            pressEscBeforeClick,
+            escBeforeClickDelayMs,
+        });
+    }
     let cancelSkipTried = false;
     for (let i = 1; i <= maxTries; i++) {
         if (runToken != null && !isRunActive(runToken)) {
@@ -4666,25 +4846,31 @@ async function runInvalidReasonAcceptFlow(
         if (expectedTaskId) {
             markTaskCommittedAfterSuccessfulUpdate(expectedTaskId);
         }
-        setStatus("Invalid flow: ส่งงานแล้ว — รอ 2 วิ ก่อน Shift+↓");
-        // หน่วง 2 วิ หลัง Update เหมือน Valid/Verified flows
+        setStatus(
+            isQcMode()
+                ? "QC: Invalid flow ส่งงานแล้ว — รอ queue"
+                : "Invalid flow: ส่งงานแล้ว — รอ 2 วิ ก่อน Shift+↓"
+        );
         await delay(2000);
         if (runToken != null && !isRunActive(runToken)) return;
-        // เช็ค + ปิด Quality Check Failed popup (ถ้ามี) ก่อนเลื่อนไป task ถัดไป
         await closeQualityCheckFailedIfPresent({ runToken });
         if (runToken != null && !isRunActive(runToken)) return;
-        if (await goToNextTask({ runToken })) {
+        if (!isQcMode() && (await goToNextTask({ runToken }))) {
             setStatus("Invalid flow: ส่ง Shift+↓ ไป task ถัดไปแล้ว");
             await delay(600);
         }
     } else if (updRes.reason === "stale") {
         return;
     } else {
-        console.log("❌ Invalid flow: ปุ่ม Update ยัง disabled หลังลอง 2 ครั้ง -> Shift+↓");
-        setStatus("Invalid flow: ข้าม Update (ปุ่มยัง disabled) → ไป task ถัดไป");
+        console.log("❌ Invalid flow: ปุ่มส่งงานยัง disabled — ข้าม");
+        setStatus(
+            isQcMode()
+                ? "QC: Invalid flow ข้ามส่งงาน — รอ queue"
+                : "Invalid flow: ข้าม Update (ปุ่มยัง disabled) → ไป task ถัดไป"
+        );
         await delay(500);
         if (runToken != null && !isRunActive(runToken)) return;
-        if (await goToNextTask({ runToken })) {
+        if (!isQcMode() && (await goToNextTask({ runToken }))) {
             setStatus("Invalid flow: ส่ง Shift+↓ ไป task ถัดไปแล้ว (ข้าม Update)");
             await delay(600);
         }
@@ -4840,11 +5026,15 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId =
     const errRes = await clickHasErrorsRadio({ tries: 8, intervalMs: 400, runToken });
     if (errRes.reason === "stale") return;
     if (!errRes.ok) {
-        console.warn("⚠️ Invalid flow: ไม่พบ radio Has Errors → Shift+↓ ข้าม");
-        setStatus("Invalid: ไม่พบ Has Errors → ไป task ถัดไป");
+        console.warn("⚠️ Invalid flow: ไม่พบ radio Has Errors");
+        setStatus(
+            isQcMode()
+                ? "QC: ไม่พบ Has Errors — รอ queue"
+                : "Invalid: ไม่พบ Has Errors → ไป task ถัดไป"
+        );
         await delay(500);
         if (!isRunActive(runToken)) return;
-        if (await goToNextTask({ runToken })) {
+        if (!isQcMode() && (await goToNextTask({ runToken }))) {
             setStatus("Invalid: ส่ง Shift+↓ ไป task ถัดไปแล้ว (ไม่พบ Has Errors)");
             await delay(600);
         }
@@ -4893,7 +5083,11 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId =
         if (expectedTaskId) {
             markTaskCommittedAfterSuccessfulUpdate(expectedTaskId);
         }
-        setStatus("Invalid flow: ส่งงานแล้ว — รอให้ระบบบันทึก");
+        setStatus(
+            isQcMode()
+                ? "QC: Invalid (No Recheck) ส่งงานแล้ว — รอ queue"
+                : "Invalid flow: ส่งงานแล้ว — รอให้ระบบบันทึก"
+        );
         await delay(1500);
         if (!isRunActive(runToken)) return;
 
@@ -4907,27 +5101,34 @@ async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId =
         }
 
         const postUpdateDelayMs = 2000;
-        console.log(
-            `⏳ Invalid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
-        );
-        setStatus(
-            `Invalid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`
-        );
+        if (isQcMode()) {
+            setStatus("QC: รอ queue ส่ง task ใหม่");
+        } else {
+            console.log(
+                `⏳ Invalid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
+            );
+            setStatus(
+                `Invalid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`
+            );
+        }
         await delay(postUpdateDelayMs);
         if (!isRunActive(runToken)) return;
-        // เช็ค + ปิด Quality Check Failed popup (ถ้ามี) ก่อนเลื่อนไป task ถัดไป
         await closeQualityCheckFailedIfPresent({ runToken });
         if (!isRunActive(runToken)) return;
-        if (await goToNextTask({ runToken })) {
+        if (!isQcMode() && (await goToNextTask({ runToken }))) {
             setStatus("Invalid flow: ส่ง Shift+↓ ไป task ถัดไปแล้ว");
             await delay(600);
         }
     } else {
-        console.log("❌ Invalid flow: ปุ่ม Update ยัง disabled → Shift+↓");
-        setStatus("Invalid flow: ข้าม Update (disabled) → ไป task ถัดไป");
+        console.log("❌ Invalid flow: ปุ่มส่งงานยัง disabled");
+        setStatus(
+            isQcMode()
+                ? "QC: Invalid flow ข้ามส่งงาน — รอ queue"
+                : "Invalid flow: ข้าม Update (disabled) → ไป task ถัดไป"
+        );
         await delay(500);
         if (!isRunActive(runToken)) return;
-        if (await goToNextTask({ runToken })) {
+        if (!isQcMode() && (await goToNextTask({ runToken }))) {
             setStatus("Invalid flow: ส่ง Shift+↓ แล้ว (ข้าม Update)");
             await delay(600);
         }
@@ -6548,19 +6749,32 @@ async function runTranscriptionPipeline(
     });
     if (!updMainRes.ok) {
         if (updMainRes.reason === "stale") return;
-        console.log("❌ 4. ข้ามการกด Update (ปุ่มยัง disabled หลังลอง 3 ครั้ง) -> Shift+↓");
-        setStatus("ข้าม Update (ปุ่มยัง disabled) → ไป task ถัดไป");
+        console.log(
+            isQcMode()
+                ? "❌ 4. QC: ข้ามส่งงาน (ปุ่มยัง disabled)"
+                : "❌ 4. ข้ามการกด Update (ปุ่มยัง disabled หลังลอง 3 ครั้ง) -> Shift+↓"
+        );
+        setStatus(
+            isQcMode()
+                ? "QC: ข้ามส่งงาน — รอ queue"
+                : "ข้าม Update (ปุ่มยัง disabled) → ไป task ถัดไป"
+        );
         await delay(500);
         if (!isRunActive(runToken)) return;
-        if (await goToNextTask({ runToken })) {
+        if (!isQcMode() && (await goToNextTask({ runToken }))) {
             setStatus("ส่ง Shift+↓ ไป task ถัดไปแล้ว (ข้าม Update)");
             await delay(600);
         }
         return;
     }
-    console.log("✅ 4. กดปุ่ม Update สำเร็จ! (robustClick)");
+    const submitLabel = isQcMode() ? "ส่งงาน (QC)" : "Update";
+    console.log(`✅ 4. กดปุ่ม ${submitLabel} สำเร็จ! (robustClick)`);
     markTaskCommittedAfterSuccessfulUpdate(pipelineTaskId);
-    setStatus("Valid: ส่งงานแล้ว — รอให้ระบบบันทึก");
+    setStatus(
+        isQcMode()
+            ? "QC: ส่งงานแล้ว — รอ queue ส่ง task ใหม่"
+            : "Valid: ส่งงานแล้ว — รอให้ระบบบันทึก"
+    );
 
     await delay(1500);
     if (!isRunActive(runToken)) return;
@@ -6579,22 +6793,29 @@ async function runTranscriptionPipeline(
     }
 
     const postUpdateDelayMs = 2000;
-    console.log(
-        `⏳ Valid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
-    );
-    setStatus(`Valid: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`);
+    if (isQcMode()) {
+        console.log(
+            `⏳ Valid flow (QC): รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ — ไม่ส่ง Shift+↓ (รอ queue)`
+        );
+        setStatus("QC: รอ queue ส่ง task ใหม่");
+    } else {
+        console.log(
+            `⏳ Valid flow: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ หลัง Update ก่อนส่ง Shift+↓`
+        );
+        setStatus(`Valid: รอ ${(postUpdateDelayMs / 1000).toFixed(1)} วิ ก่อนเลื่อนไป task ถัดไป`);
+    }
     await delay(postUpdateDelayMs);
     if (!isRunActive(runToken)) return;
     await closeQualityCheckFailedIfPresent({ runToken });
     if (!isRunActive(runToken)) return;
-    if (await goToNextTask({ runToken })) {
+    if (!isQcMode() && (await goToNextTask({ runToken }))) {
         setStatus("ส่ง Shift+↓ ไป task ถัดไปแล้ว");
         await delay(600);
     }
 }
 
 setInterval(() => {
-    if (extensionMode !== "auto" || !isAutoPilotOn || isProcessing) return;
+    if (!isAutoLikeMode() || !isAutoPilotOn || isProcessing) return;
     if (location.href !== lastSeenUrl) {
         const oldUrl = lastSeenUrl;
         lastSeenUrl = location.href;
@@ -6663,6 +6884,15 @@ setInterval(() => {
             }
 
             if (prepWaited >= stuckTaskTimeoutMs && !isProcessing) {
+                if (isQcMode()) {
+                    if (nowPrep - lastNoTargetLogAt > 2000) {
+                        lastNoTargetLogAt = nowPrep;
+                        setStatus(
+                            `QC: task ${currentTaskId} ไม่มี Classification — รอ queue ส่ง task ใหม่`
+                        );
+                    }
+                    return;
+                }
                 console.warn(
                     `[DingTag] task ${currentTaskId} ค้างไม่มี Classification เกิน ${(stuckTaskTimeoutMs / 1000).toFixed(1)} วิ → Shift+↓`
                 );
@@ -6711,6 +6941,14 @@ setInterval(() => {
             // เช็คว่า task นี้เคยส่ง Update สำเร็จแล้ว (processedTaskIds) หรือเป็น task เดิมที่ claim ไว้แต่ยังไม่ commit (lastProcessedTaskId)
             if (currentTaskId === lastProcessedTaskId || processedTaskIds.has(currentTaskId)) {
                 const now = Date.now();
+
+                if (isQcMode()) {
+                    if (now - lastNoTargetLogAt > 5000) {
+                        lastNoTargetLogAt = now;
+                        setStatus(`QC: task ${currentTaskId} ส่งแล้ว — รอ queue ส่ง task ใหม่`);
+                    }
+                    return;
+                }
 
                 // ถ้าเด้งกลับมา task ที่เคยทำแล้ว (อยู่ใน Set) → Shift+↑ กลับขึ้นไปหา task ใหม่
                 // (เปลี่ยนจาก Shift+↓ → Shift+↑ ตามคำขอ user: เจอ task ซ้ำให้กลับขึ้นไป
@@ -6797,6 +7035,13 @@ setInterval(() => {
                 const stuckDuration = now - stuckTaskDetectedAt;
 
                 if (stuckDuration >= stuckTaskTimeoutMs) {
+                    if (isQcMode()) {
+                        if (now - lastNoTargetLogAt > 5000) {
+                            lastNoTargetLogAt = now;
+                            setStatus(`QC: task ${currentTaskId} ค้าง — รอ queue ส่ง task ใหม่`);
+                        }
+                        return;
+                    }
                     // หมดเวลารอ → บังคับ Shift+↓ ไป task ถัดไป
                     console.log(
                         `⏭️ task ${currentTaskId} ค้างเกิน ${(stuckTaskTimeoutMs / 1000).toFixed(1)} วิ → บังคับ Shift+↓`
@@ -6866,7 +7111,11 @@ setInterval(() => {
                     activeRunToken = 0;
                     activeTimeouts = [];
                     console.log("🔄 จบวงจร เตรียมรอ task ใหม่...");
-                    if (isAutoPilotOn) setStatus("กำลังรอ task ใหม่...");
+                    if (isAutoPilotOn) {
+                        setStatus(
+                            isQcMode() ? "QC: กำลังรอ task ใหม่จาก queue..." : "กำลังรอ task ใหม่..."
+                        );
+                    }
                 }
             })();
         } else {
@@ -6886,7 +7135,11 @@ setInterval(() => {
                     processedTaskIds.has(idleTaskId) &&
                     !needsPrePipelineAnnotationSteps()
                 ) {
-                    setStatus(`task ${idleTaskId} ส่ง Update แล้ว — รอ task ใหม่`);
+                    setStatus(
+                        isQcMode()
+                            ? `QC: task ${idleTaskId} ส่งแล้ว — รอ queue`
+                            : `task ${idleTaskId} ส่ง Update แล้ว — รอ task ใหม่`
+                    );
                 } else if (needsPrePipelineAnnotationSteps()) {
                     const prepWaited = noClassificationStartedAt
                         ? now - noClassificationStartedAt
@@ -6902,8 +7155,13 @@ setInterval(() => {
                 }
             }
 
-                // ─────── Auto-Filter recovery: ถ้า bot ไม่เจอ target นาน → apply filter อัตโนมัติ ───────
-                if (autoFilterEnabled && !filterApplyInFlight && isFilterButtonPresent()) {
+                // ─────── Auto-Filter recovery: ถ้า bot ไม่เจอ target นาน → apply filter อัตโนมัติ (Auto เท่านั้น) ───────
+                if (
+                    extensionMode === "auto" &&
+                    autoFilterEnabled &&
+                    !filterApplyInFlight &&
+                    isFilterButtonPresent()
+                ) {
                     if (noTargetIdleSince === 0) {
                         noTargetIdleSince = now;
                     }

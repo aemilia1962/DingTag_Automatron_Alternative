@@ -137,7 +137,7 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph Browser["Chrome Extension content.js"]
-        UI[Overlay Auto / Manual / Kill Switch]
+        UI[Overlay Auto / QC / Manual / Kill Switch]
         DOM[DOM: คลิก ลาก waveform Shift+↓]
         Poll[setInterval Autopilot]
     end
@@ -156,9 +156,24 @@ flowchart LR
 
 | โหมด | พฤติกรรม |
 |------|----------|
-| **Auto** | `extensionMode === "auto"` + Autopilot ON → loop หลัก |
+| **Auto** | `extensionMode === "auto"` + Autopilot ON → loop หลัก · Filter (Shift+↑) · Shift+↑/↓ เลื่อน task |
+| **QC** | `extensionMode === "qc"` + Autopilot ON → pipeline เหมือน Auto · **ไม่** Filter/Shift · ส่งงานผ่าน Update / Accept / Fix+Accept · รอ queue เปลี่ยน `taskId` |
 | **Manual** | ถอดเสียง / formalize เอง |
 | **Kill Switch** | ยกเลิก `runToken`, เคลียร์ `processedTaskIds` |
+
+### Flow: โหมด QC
+
+```mermaid
+flowchart LR
+    poll[Autopilot poll isAutoLikeMode] --> pipe[runTranscriptionPipeline]
+    pipe --> submit[clickQcSubmitWithEnabledCheck]
+    submit --> wait[รอ taskId เปลี่ยนจาก queue]
+    wait --> poll
+```
+
+- `localStorage`: `dingtag_extension_mode` = `qc`
+- ปุ่มส่งงาน: `findQcSubmitCandidate` — ลำดับ Update → Fix+Accept → Accept
+- หลังส่งสำเร็จ: ไม่เรียก `goToNextTask` / `goToPreviousTask`
 
 ---
 

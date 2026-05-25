@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — โหมด QC: แยกปุ่ม Accept vs Fix+Accept
+
+- **Symptom:** ต้องกด Accept หรือ Fix+Accept แทน Update ในหน้า QC review
+- **Root cause:** ทั้งสองปุ่มใช้ `aria-label="accept-annotation"` เหมือนกัน — แยกไม่ได้ด้วย aria เพียงอย่างเดียว
+- **Fix:** `findAcceptAnnotationButton(kind)` — อ่าน `innerText` ของ span: `Accept` ตรงเป๊ะ vs มี `fix`+`accept`; `findQcSubmitCandidate` ลำดับ Update → Fix+Accept → Accept; QC ไม่ใช้ Shift navigation
+- **Verify:** ยังไม่ทด — reload ext 1.8.12 บน scale.dingtalk.com
+- **Reuse:** grep `accept-annotation` ก่อนเพิ่มปุ่มส่งงานใหม่
+- **Tags:** qc-mode, accept-annotation, content.js
+
 ## 2026-05-21 — ค้าง "ลาก region + กด Valid" ไม่ลากจริง
 
 - **Symptom:** status `task …: ลาก region + กด Valid (Classification ขึ้น sidebar หลังนั้น)...` ค้างยาว ไม่เห็น recovery ใน Console
