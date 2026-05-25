@@ -41,6 +41,8 @@ Port `54321`. CORS: `scale.dingtalk.com`.
 | `findAcceptAnnotationButton` | ~4225 | `button[aria-label=accept-annotation]` + ข้อความ span |
 | `findQcSubmitCandidate` | ~4240 | Update → Fix+Accept → Accept |
 | `clickQcSubmitWithEnabledCheck` | ~4255 | ส่งงาน QC (delegate จาก `clickUpdateWithEnabledCheck`) |
+| `findQcAllTasksButton` / `isQcAllTasksButtonPresent` | ~6318 | ปุ่ม QC All Tasks (Data Manager) |
+| `runQcAllTasksRecovery` | ~6340 | QC idle recovery แทน Auto-Filter |
 
 ### Waveform / region (no Classification recovery)
 

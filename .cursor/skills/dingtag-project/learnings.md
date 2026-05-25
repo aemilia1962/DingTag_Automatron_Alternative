@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-25 — QC: ไม่กด Review radios + Data Manager ใช้ QC All Tasks
+
+- **Symptom:** หน้า QC review ไม่ต้องกด Optimized/Verified; ถ้าหลุด Data Manager ต้องกลับ queue โดยไม่ใช้ Filter 6 ขั้น
+- **Root cause:** Valid path ใช้ Optimized→Verified เหมือน annotator Auto; Auto-Filter ใช้ `button[aria-label=Filters]` ซึ่งไม่มีบนหน้า QC Data Manager
+- **Fix:** `isQcMode()` ข้ามบล็อก Review ใน Valid path; `runInvalidToVerifiedFlow` ข้าม Optimized ใน QC; `findQcAllTasksButton` + `runQcAllTasksRecovery` + Autopilot idle branch แยกจาก Auto-Filter
+- **Verify:** ยังไม่ทด — reload ext 1.8.13
+- **Reuse:** grep `QC All Tasks` / `clickOptimizedRadio` ก่อนเพิ่มขั้น review ใน QC
+- **Tags:** qc-mode, review-result, qc-all-tasks, content.js
+
 ## 2026-05-25 — โหมด QC: แยกปุ่ม Accept vs Fix+Accept
 
 - **Symptom:** ต้องกด Accept หรือ Fix+Accept แทน Update ในหน้า QC review

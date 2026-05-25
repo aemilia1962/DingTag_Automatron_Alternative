@@ -2,7 +2,7 @@
 
 ไฟล์นี้เก็บ **flowchart + ขั้นตอน** สำหรับไล่ logic ทีหลัง — ไม่ใส่ใน `SKILL.md` (SKILL เน้น workflow ของ Agent)
 
-**อัปเดต:** 2026-05-25 — เพิ่ม [โหมด QC (รายละเอียด)](#โหมด-qc-รายละเอียด) · เมื่อเพิ่ม/เปลี่ยน flow ในโค้ด → แก้ไฟล์นี้ + บรรทัดสัญลักษณ์ใน [reference.md](reference.md) ถ้าจำเป็น
+**อัปเดต:** 2026-05-25 — QC ข้าม Review Result · fallback QC All Tasks (Data Manager) · ext 1.8.13 · เมื่อเพิ่ม/เปลี่ยน flow ในโค้ด → แก้ไฟล์นี้ + [reference.md](reference.md)
 
 ---
 
@@ -191,6 +191,7 @@ flowchart LR
 | Autopilot loop | `isAutoLikeMode` | เหมือนกัน (`auto` หรือ `qc`) |
 | Pipeline | `runTranscriptionPipeline` | **เหมือนกัน** |
 | ส่งงาน | ปุ่ม **Update** | **Update → Fix+Accept → Accept** (อันแรกที่กดได้) |
+| Review Result | Optimized → Verified | **ข้ามทั้งหมด** (ไม่กด radios) |
 | เลื่อน task | Shift+↓ / Shift+↑ | **ไม่ใช้** — รอ queue |
 | Auto-Filter recovery | มี | **ไม่มี** (`extensionMode === "auto"` เท่านั้น) |
 | Task ส่งแล้ว / ค้าง / ไม่มี Classification นาน | Shift+↑/↓, duplicate-loop | **รอ queue** อย่างเดียว |
@@ -221,8 +222,8 @@ flowchart TD
         P3 --> QCAPI{QC จาก API}
         QCAPI -->|fail| INV[runInvalid*Flow]
         QCAPI -->|ผ่าน| FILL[ใส่ข้อความ + formalize]
-        FILL --> RAD[Optimized + Verified]
-        RAD --> SUB[clickQcSubmitWithEnabledCheck]
+        FILL --> SKIPREV[ข้าม Review Result]
+        SKIPREV --> SUB[clickQcSubmitWithEnabledCheck]
         SUB --> POP[Ignore & Submit popup]
         POP --> WAIT2[รอ 2s — ไม่ Shift+↓]
     end
@@ -243,7 +244,7 @@ flowchart TD
 | 2 | `fetchAudioAsBase64` → `POST /api/transcribe` |
 | 3 | QC จาก API ไม่ผ่าน → `runInvalidDataMissingAcceptFlow` / `runInvalidNonTargetLanguageAcceptFlow` / `runInvalidReasonAcceptFlow` / `runInvalidToVerifiedFlow` |
 | 4 | ผ่าน → ใส่ transcript → `POST /api/formalize` |
-| 5 | Optimized → Verified |
+| 5 | **ข้าม** Review Result (ไม่กด Optimized / Verified) — Auto ยังกด Optimized → Verified |
 | 6 | `clickQcSubmitWithEnabledCheck` (เรียกจาก `clickUpdateWithEnabledCheck` เมื่อ `isQcMode()`) |
 | 7 | Popup **Ignore & Submit** ถ้ามี Quality Check Failed |
 | 8 | รอ 2s · **ไม่** `goToNextTask` · สถานะ `QC: รอ queue ส่ง task ใหม่` |
@@ -259,7 +260,8 @@ Poll เดียวกับ Auto (~6817) แต่ตัด navigation:
 | ส่งงานสำเร็จ (`processedTaskIds`) | Shift+↑ / duplicate-loop break | `setStatus` รอ queue · `return` |
 | ไม่มี Classification เกิน `stuckTaskTimeoutMs` | `fallbackSkipNoClassification` Shift+↓ | รอ queue |
 | Task ค้างหลัง claim | บังคับ Shift+↓ | รอ queue |
-| ไม่เจอ target นาน | `runAutoFilterRecovery` | ไม่รัน |
+| ไม่เจอ target นาน (หน้า labeling) | `runAutoFilterRecovery` (Filter 6 ขั้น) | ไม่รัน |
+| หลุดหน้า Data Manager (มีปุ่ม QC All Tasks) | — | `runQcAllTasksRecovery` (กดปุ่มเดียว, รอ queue) |
 
 `goToNextTask` / `goToPreviousTask` เรียก `shouldUseShiftNavigation()` — QC จะ log `[DingTag QC] ข้าม Shift+↓/↑ — รอ queue ส่ง task ใหม่` แล้ว `return false`
 
@@ -267,10 +269,18 @@ Poll เดียวกับ Auto (~6817) แต่ตัด navigation:
 
 Invalid branches ใช้ `clickUpdateWithEnabledCheck` เหมือนกัน → ใน QC ไป `clickQcSubmitWithEnabledCheck` · ท้าย flow **ไม่** `goToNextTask` · log ประมาณ `QC: Invalid flow ส่งงานแล้ว — รอ queue`
 
+**Invalid (No Recheck) ใน QC:** ข้าม Optimized · ยังกด **Has Errors** แล้วส่งงาน
+
+### Data Manager fallback (QC All Tasks)
+
+- ตรวจ: `isQcAllTasksButtonPresent()` — ปุ่มข้อความ `QC All Tasks`
+- Idle ≥ 4s + cooldown 30s → `runQcAllTasksRecovery` · mutex `qcAllTasksInFlight`
+- ไม่ใช้ Shift+↓ หลังกด — รอ URL/UI เปลี่ยน
+
 ### Grep หา entry QC
 
 ```bash
-rg "isQcMode|clickQcSubmitWithEnabledCheck|findQcSubmitCandidate|shouldUseShiftNavigation" DingTalk_Extension/content.js
+rg "isQcMode|clickQcSubmitWithEnabledCheck|findQcAllTasksButton|runQcAllTasksRecovery|shouldUseShiftNavigation" DingTalk_Extension/content.js
 ```
 
 ---

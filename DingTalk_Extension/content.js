@@ -85,6 +85,9 @@ let filterAnnotatorUsername =
 // เปิด/ปิดฟีเจอร์ Auto-Filter ทั้งหมด (hotkey Shift+↑ + ปุ่ม Apply + auto-trigger)
 let autoFilterEnabled = localStorage.getItem("dingtag_auto_filter_enabled") !== "0";
 let filterApplyInFlight = false;
+let qcAllTasksInFlight = false;
+let lastQcAllTasksAt = 0;
+const QC_ALL_TASKS_COOLDOWN_MS = 30000;
 // Auto-trigger: เมื่อ BOT ทำงานอยู่ + ไม่เจอ target task นาน → apply filter อัตโนมัติ
 // (ผูกกับ isAutoPilotOn — bot OFF จะไม่ trigger เพราะ polling loop ไม่เข้าเงื่อนไข)
 let noTargetIdleSince = 0;     // timestamp เริ่มเห็น "ไม่เจอ target" ครั้งล่าสุด
@@ -438,6 +441,8 @@ function clearAllTasks() {
     // รีเซ็ต auto-filter idle tracker (จะเริ่มนับใหม่เมื่อ bot ON อีกครั้ง)
     noTargetIdleSince = 0;
     lastAutoFilterAt = 0;
+    lastQcAllTasksAt = 0;
+    qcAllTasksInFlight = false;
     console.log("🛑 Kill Switch: ยกเลิกการกระทำทั้งหมด! (cleared committed task history)");
 }
 
@@ -5000,26 +5005,38 @@ async function switchClassificationInvalidToValid(runToken) {
  *  8) Shift+↓ ไป task ถัดไป
  */
 async function runInvalidToVerifiedFlow(runToken, cycleStartAt, expectedTaskId = "") {
-    console.log("🚩 Invalid (No Recheck): Esc → Optimized → Has Errors → Update");
-    setStatus("Invalid (No Recheck) — Optimized → Has Errors");
+    if (isQcMode()) {
+        console.log("🚩 Invalid (No Recheck, QC): Esc → Has Errors → ส่งงาน");
+        setStatus("QC: Invalid (No Recheck) — Has Errors");
+    } else {
+        console.log("🚩 Invalid (No Recheck): Esc → Optimized → Has Errors → Update");
+        setStatus("Invalid (No Recheck) — Optimized → Has Errors");
+    }
 
     if (dispatchEscape()) {
-        console.log("⎋ Invalid flow: ส่ง Escape ก่อนคลิก Optimized");
+        console.log(
+            isQcMode()
+                ? "⎋ Invalid flow (QC): ส่ง Escape ก่อนคลิก Has Errors"
+                : "⎋ Invalid flow: ส่ง Escape ก่อนคลิก Optimized"
+        );
     }
     blurAnyActiveElement();
     await delay(400);
     if (!isRunActive(runToken)) return;
 
-    // กด Optimized ก่อน
-    const optRes = await clickOptimizedRadio({ tries: 5, intervalMs: 300, runToken });
-    if (optRes.reason === "stale") return;
-    if (!optRes.ok) {
-        console.warn("⚠️ Invalid flow: ไม่พบ radio Optimized — ข้ามไปกด Has Errors เลย");
+    if (!isQcMode()) {
+        const optRes = await clickOptimizedRadio({ tries: 5, intervalMs: 300, runToken });
+        if (optRes.reason === "stale") return;
+        if (!optRes.ok) {
+            console.warn("⚠️ Invalid flow: ไม่พบ radio Optimized — ข้ามไปกด Has Errors เลย");
+        } else {
+            console.log("✅ กด Optimized แล้ว — รอ 1 วิ ก่อนกด Has Errors");
+            setStatus("Invalid: กด Optimized แล้ว — รอ 1 วิ");
+            await delay(1000);
+            if (!isRunActive(runToken)) return;
+        }
     } else {
-        console.log("✅ กด Optimized แล้ว — รอ 1 วิ ก่อนกด Has Errors");
-        setStatus("Invalid: กด Optimized แล้ว — รอ 1 วิ");
-        await delay(1000);
-        if (!isRunActive(runToken)) return;
+        console.log("⏭️ Invalid flow (QC): ข้าม Optimized — กด Has Errors");
     }
 
     // กด Has Errors
@@ -6297,6 +6314,92 @@ async function runAutoFilterRecovery() {
     return true;
 }
 
+/** หน้า Data Manager (QC): ปุ่ม "QC All Tasks" — แทน Filter ของโหมด Auto */
+function findQcAllTasksButton() {
+    const buttons = document.querySelectorAll("button");
+    for (const btn of buttons) {
+        const text = (btn.innerText || btn.textContent || "").trim();
+        if (/^qc\s+all\s+tasks$/i.test(text)) return btn;
+        const span = btn.querySelector("span");
+        if (span) {
+            const spanText = (span.innerText || span.textContent || "").trim();
+            if (/^qc\s+all\s+tasks$/i.test(spanText)) return btn;
+        }
+    }
+    return null;
+}
+
+function isQcAllTasksButtonPresent() {
+    const btn = findQcAllTasksButton();
+    if (!btn) return false;
+    if (btn.disabled) return false;
+    if (btn.hasAttribute && btn.hasAttribute("disabled")) return false;
+    if (btn.getAttribute && btn.getAttribute("aria-disabled") === "true") return false;
+    if (btn.getAttribute && btn.getAttribute("data-waiting") === "true") return false;
+    return true;
+}
+
+/**
+ * QC recovery บนหน้า Data Manager: กด "QC All Tasks" แล้วรอกลับเข้า labeling queue
+ * (ไม่ใช้ Shift+↓ — รอ navigation / task ใหม่จากระบบ)
+ */
+async function runQcAllTasksRecovery() {
+    if (qcAllTasksInFlight) {
+        console.log("[DingTag QC] QC All Tasks: กำลังทำงานอยู่ — ข้ามการเรียกซ้ำ");
+        return false;
+    }
+    const btn = findQcAllTasksButton();
+    if (!btn || !isQcAllTasksButtonPresent()) {
+        console.log("[DingTag QC] QC All Tasks: ไม่เจอปุ่มบนหน้านี้ — ข้าม");
+        return false;
+    }
+
+    qcAllTasksInFlight = true;
+    const urlBefore = location.href;
+    console.log("🚨 [DingTag QC] หน้า Data Manager — กด QC All Tasks");
+    setStatus("QC: กด QC All Tasks...");
+
+    try {
+        try {
+            btn.scrollIntoView?.({ block: "center" });
+        } catch {}
+        const rcRes = await robustClick(btn, {
+            tries: 2,
+            intervalMs: 200,
+            logLabel: "QC All Tasks",
+        });
+        if (!rcRes.ok) {
+            console.warn("[DingTag QC] QC All Tasks: robustClick ล้มเหลว —", rcRes.reason);
+            setStatus("QC: กด QC All Tasks ไม่สำเร็จ");
+            return false;
+        }
+
+        setStatus("QC: รอเข้า queue หลัง QC All Tasks...");
+        await delay(2500);
+
+        const urlAfter = location.href;
+        const btnGone = !isQcAllTasksButtonPresent();
+        const hasClassification = !!scanClassificationTarget()?.targetEl;
+        if (urlAfter !== urlBefore || btnGone || hasClassification) {
+            console.log(
+                `[DingTag QC] QC All Tasks สำเร็จ (urlChanged=${urlAfter !== urlBefore}, btnGone=${btnGone}, hasCls=${hasClassification})`
+            );
+            setStatus("QC: เข้า queue แล้ว — รอ task");
+            return true;
+        }
+
+        console.warn("[DingTag QC] QC All Tasks: คลิกแล้วแต่ยังไม่เห็น navigation — ลองอีกครั้งในรอบถัดไป");
+        setStatus("QC: รอผลจาก QC All Tasks...");
+        return false;
+    } catch (e) {
+        console.warn("[DingTag QC] runQcAllTasksRecovery error:", e?.name, e?.message);
+        setStatus("QC All Tasks: error");
+        return false;
+    } finally {
+        qcAllTasksInFlight = false;
+    }
+}
+
 // Hotkey Manual mode: คีย์บอร์ด + ปุ่มเมาส์ (เช่น Forward = button 4)
 document.addEventListener(
     "keydown",
@@ -6693,43 +6796,56 @@ async function runTranscriptionPipeline(
     }
 
     if (blurAnyActiveElement()) {
-        console.log("👀 Valid flow: blur active element ก่อนเลือก Review radios");
+        console.log(
+            isQcMode()
+                ? "👀 Valid flow (QC): blur active element ก่อนส่งงาน"
+                : "👀 Valid flow: blur active element ก่อนเลือก Review radios"
+        );
     }
     if (dispatchEscape()) {
-        console.log("⎋ Valid flow: ส่ง Escape ก่อนเลือก Review radios");
+        console.log(
+            isQcMode()
+                ? "⎋ Valid flow (QC): ส่ง Escape ก่อนส่งงาน"
+                : "⎋ Valid flow: ส่ง Escape ก่อนเลือก Review radios"
+        );
     }
     await delay(300);
     if (!isRunActive(runToken)) return;
 
-    setStatus("Valid: กด Optimized → Verified ก่อน Update");
-    const optValidRes = await clickOptimizedRadio({ tries: 5, intervalMs: 300, runToken });
-    if (!optValidRes.ok && optValidRes.reason === "stale") return;
-    if (!optValidRes.ok) {
-        console.warn("⚠️ Valid flow: ไม่พบ radio Optimized — ยังลอง Verified แล้ว Update ต่อ");
+    if (isQcMode()) {
+        console.log("⏭️ Valid flow (QC): ข้าม Review Result (Optimized / Verified)");
+        setStatus("QC: ข้าม Review Result — ส่งงาน");
     } else {
-        console.log("✅ Valid flow: เลือก Optimized แล้ว — รอก่อนกด Verified");
-    }
-    await delay(800);
-    if (!isRunActive(runToken)) return;
+        setStatus("Valid: กด Optimized → Verified ก่อน Update");
+        const optValidRes = await clickOptimizedRadio({ tries: 5, intervalMs: 300, runToken });
+        if (!optValidRes.ok && optValidRes.reason === "stale") return;
+        if (!optValidRes.ok) {
+            console.warn("⚠️ Valid flow: ไม่พบ radio Optimized — ยังลอง Verified แล้ว Update ต่อ");
+        } else {
+            console.log("✅ Valid flow: เลือก Optimized แล้ว — รอก่อนกด Verified");
+        }
+        await delay(800);
+        if (!isRunActive(runToken)) return;
 
-    const verRadioRes = await clickVerifiedRadio({ tries: 5, intervalMs: 300, runToken });
-    if (!verRadioRes.ok && verRadioRes.reason === "stale") return;
-    if (!verRadioRes.ok) {
-        console.warn("⚠️ Valid flow: ไม่พบ radio Verified — ยังลองกด Update");
-    } else {
-        console.log("✅ Valid flow: เลือก Verified (radio) แล้ว");
-    }
-    await delay(300);
-    if (!isRunActive(runToken)) return;
+        const verRadioRes = await clickVerifiedRadio({ tries: 5, intervalMs: 300, runToken });
+        if (!verRadioRes.ok && verRadioRes.reason === "stale") return;
+        if (!verRadioRes.ok) {
+            console.warn("⚠️ Valid flow: ไม่พบ radio Verified — ยังลองกด Update");
+        } else {
+            console.log("✅ Valid flow: เลือก Verified (radio) แล้ว");
+        }
+        await delay(300);
+        if (!isRunActive(runToken)) return;
 
-    if (blurAnyActiveElement()) {
-        console.log("👀 Valid flow: blur หลังเลือก radios ก่อนกด Update");
+        if (blurAnyActiveElement()) {
+            console.log("👀 Valid flow: blur หลังเลือก radios ก่อนกด Update");
+        }
+        if (dispatchEscape()) {
+            console.log("⎋ Valid flow: ส่ง Escape ก่อนกด Update");
+        }
+        await delay(200);
+        if (!isRunActive(runToken)) return;
     }
-    if (dispatchEscape()) {
-        console.log("⎋ Valid flow: ส่ง Escape ก่อนกด Update");
-    }
-    await delay(200);
-    if (!isRunActive(runToken)) return;
 
     const validTaskChk = verifyExpectedTaskIdBeforeUpdate(pipelineTaskId, "Valid flow");
     if (!validTaskChk.ok) {
@@ -7155,7 +7271,7 @@ setInterval(() => {
                 }
             }
 
-                // ─────── Auto-Filter recovery: ถ้า bot ไม่เจอ target นาน → apply filter อัตโนมัติ (Auto เท่านั้น) ───────
+                // ─────── Idle recovery: Auto → Filter | QC → QC All Tasks (Data Manager) ───────
                 if (
                     extensionMode === "auto" &&
                     autoFilterEnabled &&
@@ -7179,6 +7295,29 @@ setInterval(() => {
                                 await runAutoFilterRecovery();
                             } catch (e) {
                                 console.warn("[DingTag] auto-filter recovery error:", e?.name, e?.message);
+                            } finally {
+                                isProcessing = false;
+                            }
+                        })();
+                    }
+                } else if (isQcMode() && !qcAllTasksInFlight && isQcAllTasksButtonPresent()) {
+                    if (noTargetIdleSince === 0) {
+                        noTargetIdleSince = now;
+                    }
+                    const idleFor = now - noTargetIdleSince;
+                    const sinceLastQc = now - lastQcAllTasksAt;
+                    if (
+                        idleFor >= NO_TARGET_AUTO_FILTER_AFTER_MS &&
+                        sinceLastQc >= QC_ALL_TASKS_COOLDOWN_MS
+                    ) {
+                        lastQcAllTasksAt = now;
+                        noTargetIdleSince = 0;
+                        isProcessing = true;
+                        (async () => {
+                            try {
+                                await runQcAllTasksRecovery();
+                            } catch (e) {
+                                console.warn("[DingTag] QC All Tasks recovery error:", e?.name, e?.message);
                             } finally {
                                 isProcessing = false;
                             }
