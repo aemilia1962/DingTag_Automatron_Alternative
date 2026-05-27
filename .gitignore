@@ -1,5 +1,7 @@
 dist/
 build/
+build_build/
+dist_build/
 *.spec.bak
 __pycache__/
 *.pyc

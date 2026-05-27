@@ -20,6 +20,24 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-27 — OpenRouter transcribe: 404 ต้อง fallback model
+
+- **Symptom:** `/api/transcribe` ได้ 500 ตามด้วย error 404/NOT_FOUND และบางครั้งเจอ `'NoneType' object is not subscriptable` จาก `.choices[0]`
+- **Root cause:** audio model deprecated/ถูกถอด ทำให้ provider ตอบ 404; โค้ด parse response แบบตรงๆ โดยไม่ guard choices/message.content
+- **Fix:** เปลี่ยน `DEFAULT_AUDIO_MODEL`/`OPENROUTER_AUDIO_MODELS` ไป `google/gemini-2.5-*`; ใน `transcribe_audio_with_retry` ถ้าเจอ 404/NOT_FOUND/model unavailable ให้ข้ามไปโมเดลถัดไป; เพิ่ม `extract_first_choice_content` เพื่อ raise error ที่อ่านออกพร้อม raw snippet
+- **Verify:** py_compile ผ่าน; ยังไม่ทด call จริงกับ OpenRouter
+- **Reuse:** ถ้าเห็น 404/NOT_FOUND จาก provider ให้เพิ่ม/จัดลำดับ `OPENROUTER_AUDIO_MODELS` มากกว่าพยายาม retry โมเดลเดิม
+- **Tags:** openrouter, transcribe, 404, fallback, parsing
+
+## 2026-05-26 — Windows AV กิน PyInstaller onefile
+
+- **Symptom:** Defender/AV ลบหรือกัก `AuToMaTron.exe` หลัง build แบบ onefile
+- **Root cause:** onefile แตกไฟล์ชั่วคราวใน `%TEMP%` + พฤติกรรมคล้าย packer — heuristic สูง
+- **Fix:** `dingtag.spec` → **onedir** (`exclude_binaries=True` + `COLLECT`); แจก zip ทั้งโฟลเดอร์ `dist/AuToMaTron/`; คง `upx=False`
+- **Verify:** ยังไม่ทด — rebuild แล้วสแกนบนเครื่องผู้ใช้; ถ้ายังโดน → code signing + ส่ง false positive ให้ vendor
+- **Reuse:** อย่า zip แค่ exe เดียวใน onedir; `config.json` ยังอยู่ข้าง `AuToMaTron.exe`; self-update ยังแทนที่ exe เดิมได้
+- **Tags:** pyinstaller, onedir, antivirus, build
+
 ## 2026-05-25 — QC ค้างหลัง API 500 (claim ไม่ปล่อย)
 
 - **Symptom:** transcribe 500 แล้ว bot ไม่ retry — สถานะ `QC: task X ส่งแล้ว — รอ queue`

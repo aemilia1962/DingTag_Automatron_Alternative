@@ -15,6 +15,16 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-26 — Build PyInstaller onefile → onedir (ลด AV false positive)
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** `dingtag.spec` ใช้ `COLLECT` แทน bundle ใน exe เดียว · `build_windows_exe.bat` บอกให้ zip ทั้ง `dist/AuToMaTron/`
+- **Files:** `dingtag.spec`, `build_windows_exe.bat`
+- **Do not redo:** อย่ากลับ onefile ใน spec หลักโดยไม่จำเป็น
+- **Tags:** build, pyinstaller, antivirus
+
 ## 2026-05-25 — fix ReferenceError pipelineTaskId ใน finally (1.8.17)
 
 - **Status:** done

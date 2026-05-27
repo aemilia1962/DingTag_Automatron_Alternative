@@ -13,9 +13,10 @@ if not exist Automatron.ico (
 python -m PyInstaller dingtag.spec --noconfirm || exit /b 1
 
 echo.
-echo Done. Output:
-echo   %CD%\dist\AuToMaTron.exe
+echo Done. Output folder ^(onedir^):
+echo   %CD%\dist\AuToMaTron\
+echo   %CD%\dist\AuToMaTron\AuToMaTron.exe
 echo.
-echo Zip ^ dist\AuToMaTron.exe ^ and send. Recipient puts exe in a folder they can write to ^(Desktop/Downloads^)^;
+echo Zip the whole folder dist\AuToMaTron\ and send. Recipient extracts and runs AuToMaTron.exe;
 echo config.json will appear next to the exe on first run.
 pause
