@@ -8,3 +8,4 @@ __pycache__/
 # Local build scripts (don’t commit)
 build_windows_exe.bat
 build_windows_onedir.bat
+dingtag_onedir.spec
