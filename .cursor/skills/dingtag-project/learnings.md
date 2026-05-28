@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-28 — PyInstaller: แยก spec onefile กับ onedir กันหลง
+
+- **Symptom:** `build_windows_exe.bat` รันแล้วขึ้น `ERROR: Spec file "dingtag.spec" not found!` และมีความสับสนว่า output เป็น onedir หรือ onefile (บางครั้งได้ exe เดียว)
+- **Root cause:** ไม่มีไฟล์ `dingtag.spec` อยู่ในราก repo; สคริปต์อ้างชื่อ spec แบบ relative + ข้อความในสคริปต์บอก output ไม่ตรงกับ spec จริง
+- **Fix:** เพิ่ม `dingtag.spec` (onefile) และให้ `build_windows_exe.bat` เรียกด้วย path เต็ม `%~dp0dingtag.spec` พร้อมพิมพ์ output เป็น `dist\\AuToMaTron.exe`; แยก build onedir ออกเป็น `dingtag_onedir.spec` + `build_windows_onedir.bat` (output `dist\\AuToMaTron\\AuToMaTron.exe`)
+- **Verify:** build onefile สำเร็จและได้ `dist\\AuToMaTron.exe`; ยังไม่ทดการรัน exe บนเครื่องปลายทาง
+- **Reuse:** อย่าทำ spec เดียวให้สลับ onedir/onefile ไปมา—แยกเป็น 2 spec จะลด regression/ความสับสนและทำให้ log ใน `.bat` ตรงกับ output จริง
+- **Tags:** pyinstaller, spec, onefile, onedir, build-scripts
+
 ## 2026-05-28 — แยก Manual เป็น transcribe-only ให้ไม่ชน QC เดิม
 
 - **Symptom:** ผู้ใช้ต้องการให้ Manual ถอดเสียงอย่างเดียว ไม่เช็ค Sensitive หรือ Silence; แต่ Auto/QC ต้องคง behavior เดิมทุกอย่าง

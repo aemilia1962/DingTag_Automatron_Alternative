@@ -15,6 +15,16 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-28 — แยก build onefile/onedir + แก้ spec หาย
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** เพิ่ม `dingtag.spec` (onefile) กลับมาเพื่อแก้ `Spec file "dingtag.spec" not found`; ปรับ `build_windows_exe.bat` ให้ชี้ `%~dp0dingtag.spec` และพิมพ์ผลลัพธ์ onefile ให้ตรง; เพิ่ม build onedir แบบแยก `dingtag_onedir.spec` + `build_windows_onedir.bat`
+- **Files:** `dingtag.spec`, `dingtag_onedir.spec`, `build_windows_exe.bat`, `build_windows_onedir.bat`, `.gitignore`
+- **Do not redo:** ถ้าต้องการลด AV false positive ให้ใช้ `build_windows_onedir.bat` (zip ทั้งโฟลเดอร์) แทนไปแก้ spec หลักสลับไปมา
+- **Tags:** build, pyinstaller, onefile, onedir, scripts
+
 ## 2026-05-28 — Manual transcribe-only (ข้าม Sensitive/Silence/QC)
 
 - **Status:** done
