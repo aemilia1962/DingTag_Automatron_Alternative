@@ -20,6 +20,15 @@
 
 <!-- รายการใหม่อยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-28 — แยก Manual เป็น transcribe-only ให้ไม่ชน QC เดิม
+
+- **Symptom:** ผู้ใช้ต้องการให้ Manual ถอดเสียงอย่างเดียว ไม่เช็ค Sensitive หรือ Silence; แต่ Auto/QC ต้องคง behavior เดิมทุกอย่าง
+- **Root cause:** เดิม `runManualTranscribe` เรียก `/api/transcribe` ตัวเดียวกับ pipeline ปกติ ซึ่งมี audio preflight, moderation และ QC payload
+- **Fix:** เพิ่ม API แยก `POST /api/transcribe_manual` ใน `aibot_dingver.py` ให้รัน ASR + hallucination guard อย่างเดียว; ใน `content.js` เปลี่ยน `runManualTranscribe` ไปเรียก `postTranscribeManual` เท่านั้น และคง `runTranscriptionPipeline` ให้ใช้ `postTranscribe` เดิม
+- **Verify:** `python -m py_compile aibot_dingver.py` ผ่าน; grep ยืนยัน Manual เรียก `postTranscribeManual` และ pipeline หลักยังเรียก `postTranscribe`; ยังไม่ทดบนหน้า DingTalk จริง
+- **Reuse:** ถ้าต้องการ behavior แยกตามโหมด ให้แยก API endpoint ต่อโหมดแทนใส่ if ซ้อนใน endpoint เดิมเพื่อลด regression ต่อ Auto/QC
+- **Tags:** manual-mode, transcribe, moderation, regression-safe
+
 ## 2026-05-27 — OpenRouter transcribe: 404 ต้อง fallback model
 
 - **Symptom:** `/api/transcribe` ได้ 500 ตามด้วย error 404/NOT_FOUND และบางครั้งเจอ `'NoneType' object is not subscriptable` จาก `.choices[0]`

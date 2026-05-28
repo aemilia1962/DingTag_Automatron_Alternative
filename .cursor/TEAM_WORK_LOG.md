@@ -15,6 +15,16 @@
 
 <!-- รายการงาน — ใหม่สุดอยู่ด้านล่างบรรทัดนี้ -->
 
+## 2026-05-28 — Manual transcribe-only (ข้าม Sensitive/Silence/QC)
+
+- **Status:** done
+- **Author:** team
+- **Git:** not pushed
+- **Summary:** เพิ่ม API `POST /api/transcribe_manual` ให้ Manual ถอดเสียงอย่างเดียว (ASR-only) ไม่รัน audio preflight/sensitive/non-target/audioQuality; `runManualTranscribe` ใน extension เรียกเส้นทางนี้เท่านั้น ขณะที่ Auto/QC ใช้ `/api/transcribe` เดิมเหมือนเดิม
+- **Files:** `aibot_dingver.py`, `DingTalk_Extension/content.js`, `.cursor/skills/dingtag-project/flows.md`, `.cursor/skills/dingtag-project/learnings.md`
+- **Do not redo:** อย่าเปลี่ยน Auto/QC ไปใช้ `/api/transcribe_manual` — เส้นนี้มีไว้เฉพาะ Manual
+- **Tags:** manual-mode, transcribe-only, api, extension-mode
+
 ## 2026-05-26 — Build PyInstaller onefile → onedir (ลด AV false positive)
 
 - **Status:** done

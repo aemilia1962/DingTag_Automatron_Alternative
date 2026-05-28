@@ -1,6 +1,7 @@
 ﻿console.log("🚀 DingTalk Auto-Pilot V21 (Local API) Loaded!");
 
 const LOCAL_TRANSCRIBE_URL = "http://127.0.0.1:54321/api/transcribe";
+const LOCAL_TRANSCRIBE_MANUAL_URL = "http://127.0.0.1:54321/api/transcribe_manual";
 const LOCAL_FORMALIZE_URL = "http://127.0.0.1:54321/api/formalize";
 const LOCAL_PHYSICAL_CLICK_URL = "http://127.0.0.1:54321/api/physical_click";
 
@@ -340,7 +341,7 @@ async function runManualTranscribe() {
             setManualStatus("ไม่มีไฟล์เสียงบนหน้านี้");
             return;
         }
-        const apiResult = await postTranscribe(audioBase64);
+        const apiResult = await postTranscribeManual(audioBase64);
         if (!apiResult.ok) {
             setManualStatus(
                 (apiResult.errorLabel || "API error") +
@@ -674,6 +675,53 @@ async function postTranscribe(audioBase64) {
         );
     }
     console.log(...logParts);
+    return { ok: true, data };
+}
+
+/** Manual mode only: ASR-only path (no Sensitive/Silence/QC checks) */
+async function postTranscribeManual(audioBase64) {
+    const payload = JSON.stringify({ audioBase64 });
+    const kb = Math.round(payload.length / 1024);
+    console.log("[DingTag Manual] กำลัง POST ไปยัง", LOCAL_TRANSCRIBE_MANUAL_URL, "| ขนาด body ~" + kb + " KB");
+
+    let res;
+    try {
+        res = await fetch(LOCAL_TRANSCRIBE_MANUAL_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload,
+        });
+    } catch (e) {
+        const name = e?.name || "Error";
+        const msg = e?.message || String(e);
+        return {
+            ok: false,
+            errorLabel: "เชื่อมต่อ Manual API ไม่ได้",
+            detail: name + ": " + msg,
+        };
+    }
+
+    const rawText = await res.text();
+    let data;
+    try {
+        data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+        return {
+            ok: false,
+            errorLabel: "Manual API ตอบกลับผิดรูปแบบ",
+            detail: "HTTP " + res.status + " — " + (rawText.slice(0, 120) || "(ว่าง)"),
+        };
+    }
+
+    if (!res.ok) {
+        return {
+            ok: false,
+            data,
+            errorLabel: "Manual API error " + res.status,
+            detail: (data && (data.message || data.detail)) || rawText.slice(0, 200),
+        };
+    }
+    console.log("[DingTag Manual] API ตอบกลับ:", data.status, "| textLen:", (data.text || "").length);
     return { ok: true, data };
 }
 

@@ -166,6 +166,10 @@ class TranscribeRequest(BaseModel):
     asyncMode: bool = Field(False, description="If true, returns a jobId immediately")
 
 
+class ManualTranscribeRequest(BaseModel):
+    audioBase64: str = Field(..., description="WAV file bytes, standard Base64")
+
+
 class FormalizeRequest(BaseModel):
     text: str = Field(..., description="Plain transcript text")
     formalModel: str | None = Field(
@@ -766,6 +770,28 @@ def api_transcribe(body: TranscribeRequest):
         return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
     except Exception as e:
         print(f"[API] ผิดพลาด 500: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@fastapi_app.post("/api/transcribe_manual")
+def api_transcribe_manual(body: ManualTranscribeRequest):
+    inst = _transcriber_instance
+    b64_len = len(body.audioBase64) if body.audioBase64 else 0
+    print(f"[API] POST /api/transcribe_manual รับแล้ว (Base64 ~{b64_len // 1000}k ตัวอักษร)")
+    if inst is None or not inst.is_ai_active:
+        print("[API] transcribe_manual ตอบกลับ: paused (แอปยังไม่พร้อม หรือปิด AI)")
+        return {"status": "paused"}
+    try:
+        out = inst.run_transcribe_manual_only(body.audioBase64)
+        print(
+            f"[API] transcribe_manual สำเร็จ — ความยาวข้อความ={len((out.get('text') or ''))}"
+        )
+        return out
+    except ValueError as e:
+        print(f"[API] transcribe_manual ผิดพลาด 400: {e}")
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
+    except Exception as e:
+        print(f"[API] transcribe_manual ผิดพลาด 500: {e}")
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
@@ -2029,6 +2055,42 @@ class AITranscriberApp(AppUI, ctk.CTk):
                 )
         _session_stats_record_transcribe(time.time() - t0)
         return {"status": "success", "text": result_text, "isSensitive": is_sensitive, "qc": qc}
+
+    def run_transcribe_manual_only(self, audio_b64: str) -> dict:
+        """Manual mode: ASR-only path (no silence gate, no moderation, no QC branches)."""
+        t0 = time.time()
+        with self._models_lock:
+            audio_model = self.audio_model
+        try:
+            raw_bytes = base64.b64decode(audio_b64, validate=False)
+        except Exception as e:
+            raise ValueError("Invalid Base64 audio") from e
+        if not raw_bytes:
+            raise ValueError("Empty audio payload")
+        if not _is_probably_wav(raw_bytes):
+            print(
+                "[API] ⚠️ transcribe_manual: ไฟล์เสียงอาจไม่ใช่ WAV (RIFF/WAVE header ไม่ตรง) — จะพยายามแปลง/ffmpeg"
+            )
+
+        wav_bytes, _norm_meta = normalize_audio_to_wav_pcm16_mono(raw_bytes)
+        b64_clean = base64.b64encode(wav_bytes or raw_bytes).decode("ascii")
+        prompt_rules = (
+            DINGTALK_PROMPT
+            + "\n- NO BRACKETS: ห้ามสร้างวงเล็บ () เด็ดขาด ลบวงเล็บทิ้งให้หมด"
+        )
+        result_text, hallu_meta = self._transcribe_with_hallucination_guard(
+            audio_model, b64_clean, prompt_rules
+        )
+        warn_digital_time_leak_if_any(result_text, "transcribe_manual")
+        if hallu_meta.get("retried"):
+            print(
+                "[API] transcribe_manual hallucination guard | "
+                f"primaryHallucinated={hallu_meta.get('primaryHallucinated')} "
+                f"retriedHallucinated={hallu_meta.get('retriedHallucinated')} "
+                f"fallback={hallu_meta.get('fallbackModel')}"
+            )
+        _session_stats_record_transcribe(time.time() - t0)
+        return {"status": "success", "text": result_text}
 
     def run_formalize_only(self, text: str, formal_model_override: str | None = None) -> dict:
         """Step 2: formalize only (expects raw already shown to user)."""

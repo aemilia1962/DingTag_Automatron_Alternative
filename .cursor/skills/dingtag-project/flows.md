@@ -2,7 +2,7 @@
 
 ไฟล์นี้เก็บ **flowchart + ขั้นตอน** สำหรับไล่ logic ทีหลัง — ไม่ใส่ใน `SKILL.md` (SKILL เน้น workflow ของ Agent)
 
-**อัปเดต:** 2026-05-25 — Re-check เคลียร์ Invalid Reason ก่อน Valid · QC ข้าม Review · ext 1.8.15 · เมื่อเพิ่ม/เปลี่ยน flow → แก้ไฟล์นี้ + [reference.md](reference.md)
+**อัปเดต:** 2026-05-28 — Manual transcribe-only (`/api/transcribe_manual`) · Auto/QC คง pipeline เดิม · เมื่อเพิ่ม/เปลี่ยน flow → แก้ไฟล์นี้ + [reference.md](reference.md)
 
 ---
 
@@ -159,8 +159,22 @@ flowchart LR
 |------|----------|
 | **Auto** | `extensionMode === "auto"` + Autopilot ON → loop หลัก · Filter (Shift+↑) · Shift+↑/↓ เลื่อน task |
 | **QC** | `extensionMode === "qc"` + Autopilot ON → pipeline เหมือน Auto · **ไม่** Filter/Shift · ส่งงานผ่าน Update / Accept / Fix+Accept · รอ queue เปลี่ยน `taskId` |
-| **Manual** | ถอดเสียง / formalize เอง |
+| **Manual** | ถอดเสียงผ่าน `POST /api/transcribe_manual` (ASR-only) และ formalize เอง; ไม่ใช้ Sensitive/Silence/QC branches |
 | **Kill Switch** | ยกเลิก `runToken`, เคลียร์ `processedTaskIds` |
+
+### Flow: โหมด Manual (สรุปสั้น)
+
+```mermaid
+flowchart LR
+    manualTrigger[Manual hotkey or button] --> fetchAudio[fetchAudioAsBase64]
+    fetchAudio --> manualApi[POST api transcribe_manual]
+    manualApi --> writeText[setTextareaValueAndNotify]
+    writeText --> doneManual[User review and Update]
+```
+
+- ใช้เฉพาะ `runManualTranscribe` → `postTranscribeManual`
+- ไม่เข้า `runTranscriptionPipeline`
+- ไม่ใช้ `isSensitive`, `qc.longSilence`, `qc.audioQuality`, `qc.isNonTarget`
 
 ### Flow: โหมด QC (สรุปสั้น)
 

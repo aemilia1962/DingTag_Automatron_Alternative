@@ -15,6 +15,7 @@ Use this file instead of scanning full sources. Line numbers are approximate; gr
 | Route | ~line | Purpose |
 |-------|-------|---------|
 | `POST /api/transcribe` | 729 | Audio → transcript + QC |
+| `POST /api/transcribe_manual` | ~772 | Manual mode: ASR-only (no moderation/QC) |
 | `GET /api/transcribe/job/{id}` | 304 | Async job |
 | `GET /api/stats` | 773 | Session stats |
 | `POST /api/formalize` | 779 | Formal text |
@@ -27,6 +28,7 @@ Port `54321`. CORS: `scale.dingtalk.com`.
 | Function | ~line | Role |
 |----------|-------|------|
 | `postTranscribe` | 509 | `/api/transcribe` |
+| `postTranscribeManual` | ~682 | `/api/transcribe_manual` (manual only) |
 | `postFormalize` | 613 | `/api/formalize` |
 | `postPhysicalClick` | 687 | `/api/physical_click` |
 | `runTranscriptionPipeline` | ~5400 | Main auto pipeline |
